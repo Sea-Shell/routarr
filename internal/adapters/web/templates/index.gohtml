@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>yt2sp - Dashboard</title>
+    <style>
+        body { font-family: sans-serif; margin: 2rem; max-width: 960px; }
+        table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+        th, td { border: 1px solid #ddd; padding: 0.5rem; text-align: left; }
+        .status-ok { color: #137333; font-weight: bold; }
+        .status-missing { color: #b3261e; font-weight: bold; }
+        .flash { background: #e8f0fe; padding: 0.75rem; border-radius: 6px; }
+        .actions a { margin-right: 0.5rem; }
+    </style>
+</head>
+<body>
+    <h1>yt2sp</h1>
+
+    {{if .Flash}}
+    <p class="flash">{{.Flash}}</p>
+    {{end}}
+
+    <h2>Provider Connections</h2>
+    <ul>
+        <li>
+            YouTube:
+            {{if .YouTubeConnected}}<span class="status-ok">Connected</span>{{else}}<span class="status-missing">Not connected</span>{{end}}
+            {{if not .YouTubeConnected}}<a href="/oauth/youtube/connect">Connect</a>{{end}}
+        </li>
+        <li>
+            Spotify:
+            {{if .SpotifyConnected}}<span class="status-ok">Connected</span>{{else}}<span class="status-missing">Not connected</span>{{end}}
+            {{if not .SpotifyConnected}}<a href="/oauth/spotify/connect">Connect</a>{{end}}
+        </li>
+    </ul>
+
+    <p>
+        <a href="/mappings/new">Create Mapping</a>
+    </p>
+
+    <h2>Playlist Mappings</h2>
+    {{if .Mappings}}
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>YouTube</th>
+                <th>Spotify</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .Mappings}}
+            <tr>
+                <td>{{.Mapping.ID}}</td>
+                <td>{{.Mapping.YTPlaylistTitle}} ({{.Mapping.YTPlaylistID}})</td>
+                <td>{{.Mapping.SPPlaylistTitle}} ({{.Mapping.SPPlaylistID}})</td>
+                <td class="actions">
+                    {{if gt .LatestRunID 0}}
+                    <a href="/runs/{{.LatestRunID}}">Last Sync</a>
+                    <a href="/runs/{{.LatestRunID}}/review">Review Uncertain</a>
+                    {{else}}
+                    <em>No runs yet</em>
+                    {{end}}
+                </td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    {{else}}
+    <p>No mappings yet. Create your first mapping to start syncing.</p>
+    {{end}}
+</body>
+</html>

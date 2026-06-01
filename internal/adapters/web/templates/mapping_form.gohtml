@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>yt2sp - Create Mapping</title>
+    <style>
+        body { font-family: sans-serif; margin: 2rem; max-width: 720px; }
+        label { display: block; margin-top: 1rem; font-weight: 600; }
+        input { width: 100%; max-width: 520px; padding: 0.5rem; }
+        .error { color: #b3261e; font-weight: 600; }
+        .flash { background: #e8f0fe; padding: 0.75rem; border-radius: 6px; }
+        button { margin-top: 1rem; padding: 0.6rem 1rem; }
+    </style>
+</head>
+<body>
+    <h1>Create Playlist Mapping</h1>
+
+    <p><a href="/">Back to dashboard</a></p>
+
+    {{if .Flash}}<p class="flash">{{.Flash}}</p>{{end}}
+    {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+
+    <form method="post" action="/mappings">
+        <label for="youtube_playlist_id">YouTube Playlist ID *</label>
+        <input id="youtube_playlist_id" name="youtube_playlist_id" required />
+
+        <label for="youtube_playlist_title">YouTube Playlist Title (optional)</label>
+        <input id="youtube_playlist_title" name="youtube_playlist_title" />
+
+        <label for="spotify_playlist_id">Spotify Playlist ID *</label>
+        <input id="spotify_playlist_id" name="spotify_playlist_id" required />
+
+        <label for="spotify_playlist_title">Spotify Playlist Title (optional)</label>
+        <input id="spotify_playlist_title" name="spotify_playlist_title" />
+
+        <button type="submit">Create Mapping</button>
+    </form>
+</body>
+</html>
