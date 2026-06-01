@@ -12,5 +12,6 @@ type YouTubeService interface {
 
 type SpotifyService interface {
 	SearchTrack(ctx context.Context, query string) (*domain.TrackMatch, error)
+	GetPlaylistTracks(ctx context.Context, playlistID string) ([]string, error)
 	AddTrackToPlaylist(ctx context.Context, playlistID, trackID string) error
 }

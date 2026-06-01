@@ -1,40 +1,144 @@
-<!doctype html>
-<html lang="en">
-<head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>yt2sp - Create Mapping</title>
-    <style>
-        body { font-family: sans-serif; margin: 2rem; max-width: 720px; }
-        label { display: block; margin-top: 1rem; font-weight: 600; }
-        input { width: 100%; max-width: 520px; padding: 0.5rem; }
-        .error { color: #b3261e; font-weight: 600; }
-        .flash { background: #e8f0fe; padding: 0.75rem; border-radius: 6px; }
-        button { margin-top: 1rem; padding: 0.6rem 1rem; }
-    </style>
-</head>
-<body>
-    <h1>Create Playlist Mapping</h1>
+{{define "title"}}yt2sp — New Transfer Route{{end}}
 
-    <p><a href="/">Back to dashboard</a></p>
+{{define "content"}}
+<style>
+    .route-grid {
+        display: grid;
+        grid-template-columns: 1fr 2.5rem 1fr;
+        gap: 0.75rem;
+        align-items: start;
+    }
 
-    {{if .Flash}}<p class="flash">{{.Flash}}</p>{{end}}
-    {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+    .route-arrow {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding-top: 3.25rem;
+        color: var(--muted);
+        font-size: 1.2rem;
+    }
 
-    <form method="post" action="/mappings">
-        <label for="youtube_playlist_id">YouTube Playlist ID *</label>
-        <input id="youtube_playlist_id" name="youtube_playlist_id" required />
+    .route-side .side-header {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+        padding-bottom: 0.75rem;
+        border-bottom: 1px solid var(--border);
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--muted);
+    }
 
-        <label for="youtube_playlist_title">YouTube Playlist Title (optional)</label>
-        <input id="youtube_playlist_title" name="youtube_playlist_title" />
+    /* let inputs fill the panel width */
+    .route-side input[type="text"] {
+        max-width: 100%;
+    }
 
-        <label for="spotify_playlist_id">Spotify Playlist ID *</label>
-        <input id="spotify_playlist_id" name="spotify_playlist_id" required />
+    @media (max-width: 620px) {
+        .route-grid {
+            grid-template-columns: 1fr;
+        }
+        .route-arrow {
+            display: none;
+        }
+    }
+</style>
 
-        <label for="spotify_playlist_title">Spotify Playlist Title (optional)</label>
-        <input id="spotify_playlist_title" name="spotify_playlist_title" />
+<p><a href="/">← Dashboard</a></p>
+<h1>New Transfer Route</h1>
 
-        <button type="submit">Create Mapping</button>
-    </form>
-</body>
-</html>
+<p style="color:var(--muted); font-size:0.85rem; margin-bottom:1.75rem;">
+    Specify the YouTube source playlist and the Spotify destination playlist.
+    A dry sync run will preview all matches before anything is committed.
+</p>
+
+{{if .Flash}}<p class="flash">{{.Flash}}</p>{{end}}
+{{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+
+<form method="post" action="/mappings">
+    <div class="route-grid">
+
+        <!-- ── Source ─────────────────────────────────────────── -->
+        <div class="panel route-side">
+            <div class="side-header">
+                <span class="badge badge-ok">Source</span>
+                YouTube Playlist
+            </div>
+
+            <label for="youtube_playlist_id">
+                Playlist ID <span style="color:var(--red)">*</span>
+            </label>
+            <input
+                type="text"
+                id="youtube_playlist_id"
+                name="youtube_playlist_id"
+                required
+                autocomplete="off"
+                placeholder="PLxxxxxxxxxxxxxxxx"
+            />
+            <small style="color:var(--muted); line-height:1.4; display:block; margin-top:0.35rem; margin-bottom:0.75rem;">
+                Open the playlist on YouTube. The ID is the <code>list=</code> parameter in the URL —
+                e.g. <code>youtube.com/playlist?list=<strong>PLxxxx…</strong></code>.
+                It usually starts with <code>PL</code>, <code>RD</code>, or <code>UU</code>.
+            </small>
+
+            <label for="youtube_playlist_title">
+                Display Label <span style="color:var(--muted)">(optional)</span>
+            </label>
+            <input
+                type="text"
+                id="youtube_playlist_title"
+                name="youtube_playlist_title"
+                placeholder="e.g. My YouTube Mix"
+            />
+        </div>
+
+        <!-- ── Transfer arrow ─────────────────────────────────── -->
+        <div class="route-arrow">→</div>
+
+        <!-- ── Destination ────────────────────────────────────── -->
+        <div class="panel route-side">
+            <div class="side-header">
+                <span class="badge badge-muted">Destination</span>
+                Spotify Playlist
+            </div>
+
+            <label for="spotify_playlist_id">
+                Playlist ID <span style="color:var(--red)">*</span>
+            </label>
+            <input
+                type="text"
+                id="spotify_playlist_id"
+                name="spotify_playlist_id"
+                required
+                autocomplete="off"
+                placeholder="37i9dQZF1DXxxxxxxx"
+            />
+            <small style="color:var(--muted); line-height:1.4; display:block; margin-top:0.35rem; margin-bottom:0.75rem;">
+                Open the playlist in Spotify. The ID is the last path segment of the URL —
+                e.g. <code>open.spotify.com/playlist/<strong>37i9dQ…</strong></code>.
+                Alternatively, right-click the playlist → <em>Share</em> → <em>Copy link to playlist</em>
+                and extract the 22-character ID from the link.
+            </small>
+
+            <label for="spotify_playlist_title">
+                Display Label <span style="color:var(--muted)">(optional)</span>
+            </label>
+            <input
+                type="text"
+                id="spotify_playlist_title"
+                name="spotify_playlist_title"
+                placeholder="e.g. My Spotify Mix"
+            />
+        </div>
+
+    </div>
+
+    <div class="actions" style="margin-top:1.75rem;">
+        <button class="btn btn-primary" type="submit">Create Transfer Route</button>
+        <a class="btn btn-ghost" href="/">Cancel</a>
+    </div>
+</form>
+{{end}}

@@ -88,13 +88,21 @@ func (a *Adapter) GetPlaylistVideos(ctx context.Context, playlistID string) ([]d
 			videoIDs = append(videoIDs, videoID)
 		}
 
-		durations, err := a.fetchVideoDurations(ctx, videoIDs)
+		availability, durations, err := a.fetchVideoDetails(ctx, videoIDs)
 		if err != nil {
 			return nil, err
 		}
 
 		for i := range pageVideos {
-			pageVideos[i].duration = durations[pageVideos[i].videoID]
+			vid := pageVideos[i].videoID
+			avail, found := availability[vid]
+			// Status field is authoritative when the Videos API returns the item.
+			// Title check is defense-in-depth: truly deleted videos may be omitted
+			// from the Videos API response entirely, leaving their availability unknown.
+			if !found || !avail || pageVideos[i].title == "Private video" || pageVideos[i].title == "Deleted video" {
+				continue // skip unavailable videos
+			}
+			pageVideos[i].duration = durations[vid]
 			videos = append(videos, pageVideos[i])
 		}
 
@@ -160,49 +168,54 @@ func (a *Adapter) fetchPlaylistPage(ctx context.Context, playlistID, pageToken s
 	return &payload, nil
 }
 
-func (a *Adapter) fetchVideoDurations(ctx context.Context, videoIDs []string) (map[string]string, error) {
+func (a *Adapter) fetchVideoDetails(ctx context.Context, videoIDs []string) (map[string]bool, map[string]string, error) {
 	if len(videoIDs) == 0 {
-		return map[string]string{}, nil
+		return map[string]bool{}, map[string]string{}, nil
 	}
 
 	endpoint, err := url.Parse(a.baseURL + videosPath)
 	if err != nil {
-		return nil, fmt.Errorf("build youtube videos endpoint: %w", err)
+		return nil, nil, fmt.Errorf("build youtube videos endpoint: %w", err)
 	}
 
 	query := endpoint.Query()
-	query.Set("part", "contentDetails")
+	query.Set("part", "contentDetails,status")
 	query.Set("id", strings.Join(videoIDs, ","))
 	endpoint.RawQuery = query.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("create youtube videos request: %w", err)
+		return nil, nil, fmt.Errorf("create youtube videos request: %w", err)
 	}
 	a.setAuth(req)
 
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request youtube videos: %w", err)
+		return nil, nil, fmt.Errorf("request youtube videos: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("youtube videos request failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, nil, fmt.Errorf("youtube videos request failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var payload videosResponse
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, fmt.Errorf("decode youtube videos response: %w", err)
+		return nil, nil, fmt.Errorf("decode youtube videos response: %w", err)
 	}
 
+	available := make(map[string]bool, len(payload.Items))
 	durations := make(map[string]string, len(payload.Items))
+
 	for _, item := range payload.Items {
 		durations[item.ID] = item.ContentDetails.Duration
+		// Private videos are not available for playback.
+		// Unlisted videos remain accessible via direct link so are treated as available.
+		available[item.ID] = item.Status.PrivacyStatus != "private"
 	}
 
-	return durations, nil
+	return available, durations, nil
 }
 
 func (a *Adapter) setAuth(req *http.Request) {
@@ -228,9 +241,17 @@ type playlistItemsResponse struct {
 
 type videosResponse struct {
 	Items []struct {
-		ID             string `json:"id"`
+		ID     string `json:"id"`
+		Status struct {
+			PrivacyStatus string `json:"privacyStatus"` // "public", "unlisted", "private"
+			Embeddable    bool   `json:"embeddable"`    // TODO: use for embeddability filtering in a future phase
+		} `json:"status"`
 		ContentDetails struct {
-			Duration string `json:"duration"`
+			Duration          string `json:"duration"`
+			RegionRestriction struct {
+				Allowed []string `json:"allowed"`
+				Blocked []string `json:"blocked"`
+			} `json:"regionRestriction"` // TODO: use for region-based filtering in a future phase
 		} `json:"contentDetails"`
 	} `json:"items"`
 }

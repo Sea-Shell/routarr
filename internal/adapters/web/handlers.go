@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -37,7 +38,7 @@ type Handler struct {
 	db                  *sql.DB
 	mappingRepo         ports.MappingRepository
 	syncService         syncCommitter
-	templates           *template.Template
+	templates           map[string]*template.Template
 	oauthConfigs        map[string]*oauth2.Config
 	oauthTokenExchanger func(ctx context.Context, conf *oauth2.Config, code string) (*oauth2.Token, error)
 }
@@ -54,8 +55,9 @@ type indexViewData struct {
 }
 
 type indexMappingView struct {
-	Mapping     domain.PlaylistMapping
-	LatestRunID int
+	Mapping            domain.PlaylistMapping
+	LatestRunID        int
+	PendingReviewCount int
 }
 
 type mappingFormData struct {
@@ -108,7 +110,7 @@ type matchReviewData struct {
 	Error string
 }
 
-func NewHandler(db *sql.DB, mappingRepo ports.MappingRepository, ytClientID, ytSecret, spClientID, spSecret string, syncServices ...syncCommitter) (*Handler, error) {
+func NewHandler(db *sql.DB, mappingRepo ports.MappingRepository, oauthBaseURL, ytClientID, ytSecret, spClientID, spSecret string, syncServices ...syncCommitter) (*Handler, error) {
 	if db == nil {
 		return nil, fmt.Errorf("web handler db is nil")
 	}
@@ -121,22 +123,32 @@ func NewHandler(db *sql.DB, mappingRepo ports.MappingRepository, ytClientID, ytS
 		syncService = syncServices[0]
 	}
 
-	tmpl, err := template.ParseFS(templateFS, "templates/*.gohtml")
-	if err != nil {
-		return nil, fmt.Errorf("parse templates: %w", err)
+	pages := []string{
+		"index.gohtml",
+		"mapping_form.gohtml",
+		"sync_detail.gohtml",
+		"match_review.gohtml",
+	}
+	tmpls := make(map[string]*template.Template, len(pages))
+	for _, page := range pages {
+		t, err := template.ParseFS(templateFS, "templates/layout.gohtml", "templates/"+page)
+		if err != nil {
+			return nil, fmt.Errorf("parse template %s: %w", page, err)
+		}
+		tmpls[page] = t
 	}
 
 	return &Handler{
 		db:          db,
 		mappingRepo: mappingRepo,
 		syncService: syncService,
-		templates:   tmpl,
+		templates:   tmpls,
 		oauthConfigs: map[string]*oauth2.Config{
 			providerYouTube: {
 				ClientID:     strings.TrimSpace(ytClientID),
 				ClientSecret: strings.TrimSpace(ytSecret),
 				Endpoint:     google.Endpoint,
-				RedirectURL:  "http://localhost:8080/oauth/youtube/callback",
+				RedirectURL:  strings.TrimRight(oauthBaseURL, "/") + "/oauth/youtube/callback",
 				Scopes: []string{
 					"https://www.googleapis.com/auth/youtube.readonly",
 				},
@@ -145,7 +157,7 @@ func NewHandler(db *sql.DB, mappingRepo ports.MappingRepository, ytClientID, ytS
 				ClientID:     strings.TrimSpace(spClientID),
 				ClientSecret: strings.TrimSpace(spSecret),
 				Endpoint:     spotifyoauth.Endpoint,
-				RedirectURL:  "http://localhost:8080/oauth/spotify/callback",
+				RedirectURL:  strings.TrimRight(oauthBaseURL, "/") + "/oauth/spotify/callback",
 				Scopes: []string{
 					"playlist-read-private",
 					"playlist-modify-private",
@@ -187,11 +199,18 @@ func (h *Handler) index(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	pendingCounts, err := h.pendingCountsByLatestRun(ctx)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("list pending review counts: %v", err), http.StatusInternalServerError)
+		return
+	}
+
 	indexMappings := make([]indexMappingView, 0, len(mappings))
 	for _, m := range mappings {
 		indexMappings = append(indexMappings, indexMappingView{
-			Mapping:     m,
-			LatestRunID: latestRunByMapping[m.ID],
+			Mapping:            m,
+			LatestRunID:        latestRunByMapping[m.ID],
+			PendingReviewCount: pendingCounts[m.ID],
 		})
 	}
 
@@ -772,11 +791,53 @@ GROUP BY mapping_id
 	return result, nil
 }
 
-func (h *Handler) render(w http.ResponseWriter, templateName string, data any) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := h.templates.ExecuteTemplate(w, templateName, data); err != nil {
-		http.Error(w, fmt.Sprintf("render template %s: %v", templateName, err), http.StatusInternalServerError)
+// pendingCountsByLatestRun returns, for each mapping ID, the number of
+// track_matches in a "pending" decision state that belong to that mapping's
+// most recent sync run. A single query avoids N+1 calls.
+func (h *Handler) pendingCountsByLatestRun(ctx context.Context) (map[int]int, error) {
+	rows, err := h.db.QueryContext(ctx, `
+SELECT sr.mapping_id, COUNT(tm.youtube_video_id)
+FROM sync_runs sr
+JOIN sync_items si ON si.sync_run_id = sr.id
+JOIN track_matches tm ON tm.youtube_video_id = si.youtube_video_id
+WHERE sr.id IN (SELECT MAX(id) FROM sync_runs GROUP BY mapping_id)
+  AND tm.decision = ?
+GROUP BY sr.mapping_id
+`, string(domain.MatchPending))
+	if err != nil {
+		return nil, fmt.Errorf("query pending counts by latest run: %w", err)
 	}
+	defer rows.Close()
+
+	result := make(map[int]int)
+	for rows.Next() {
+		var mappingID, count int
+		if err := rows.Scan(&mappingID, &count); err != nil {
+			return nil, fmt.Errorf("scan pending count row: %w", err)
+		}
+		result[mappingID] = count
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate pending count rows: %w", err)
+	}
+
+	return result, nil
+}
+
+func (h *Handler) render(w http.ResponseWriter, templateName string, data any) {
+	t, ok := h.templates[templateName]
+	if !ok {
+		http.Error(w, "template not found: "+templateName, http.StatusInternalServerError)
+		return
+	}
+	var buf bytes.Buffer
+	if err := t.ExecuteTemplate(&buf, "layout.gohtml", data); err != nil {
+		http.Error(w, fmt.Sprintf("render template %s: %v", templateName, err), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = buf.WriteTo(w)
 }
 
 func normalizeProvider(provider string) (string, bool) {

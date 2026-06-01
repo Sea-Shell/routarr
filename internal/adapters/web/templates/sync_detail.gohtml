@@ -1,68 +1,256 @@
-<!doctype html>
-<html lang="en">
-<head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>yt2sp - Sync Run {{.Run.ID}}</title>
-    <style>
-        body { font-family: sans-serif; margin: 2rem; max-width: 1080px; }
-        table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
-        th, td { border: 1px solid #ddd; padding: 0.5rem; text-align: left; vertical-align: top; }
-        .flash { background: #e8f0fe; padding: 0.75rem; border-radius: 6px; }
-        .meta dt { font-weight: 700; }
-        .meta dd { margin: 0 0 0.6rem 0; }
-        .actions { margin: 1rem 0; }
-    </style>
-</head>
-<body>
-    <h1>Sync Run #{{.Run.ID}}</h1>
-    <p><a href="/">Back to dashboard</a></p>
+{{define "title"}}yt2sp — Run Telemetry #{{.Run.ID}}{{end}}
 
-    {{if .Flash}}<p class="flash">{{.Flash}}</p>{{end}}
+{{define "content"}}
+<style>
+    /* ── Run stats strip ─────────────────────────────────────── */
+    .run-stats {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 0.75rem;
+        margin-bottom: 1.5rem;
+    }
 
-    <dl class="meta">
-        <dt>Status</dt><dd>{{.Run.Status}}</dd>
-        <dt>Mapping</dt><dd>{{.Run.MappingYouTubeTitle}} → {{.Run.MappingSpotifyTitle}}</dd>
-        <dt>Started</dt><dd>{{.Run.StartedAt}}</dd>
-        <dt>Finished</dt><dd>{{if .Run.FinishedAt}}{{.Run.FinishedAt}}{{else}}-{{end}}</dd>
-        <dt>Pending review</dt><dd>{{.PendingCount}}</dd>
-    </dl>
+    .run-stat {
+        background: var(--panel-bg);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 0.9rem 1rem;
+        text-align: center;
+    }
 
-    <div class="actions">
-        <form method="post" action="/runs/{{.Run.ID}}/confirm" style="display:inline">
-            <button type="submit">Confirmed</button>
-        </form>
-        <a href="/runs/{{.Run.ID}}/review">Review uncertain matches</a>
+    .run-stat-value {
+        display: block;
+        font-size: 1.6rem;
+        font-weight: 700;
+        line-height: 1.1;
+        color: var(--text);
+    }
+
+    .run-stat-label {
+        display: block;
+        font-size: 0.66rem;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--muted);
+        margin-top: 0.3rem;
+    }
+
+    .run-stat.stat-pending .run-stat-value   { color: var(--amber); }
+    .run-stat.stat-total   .run-stat-value   { color: var(--green); }
+
+    /* ── Telemetry log ───────────────────────────────────────── */
+    .telem-header {
+        display: grid;
+        grid-template-columns: 5rem 1fr 1fr 5.5rem 6rem;
+        gap: 0.5rem;
+        padding: 0.35rem 0.75rem;
+        font-size: 0.66rem;
+        text-transform: uppercase;
+        letter-spacing: 0.09em;
+        color: var(--muted);
+        border-bottom: 1px solid var(--border);
+    }
+
+    .telem-row {
+        display: grid;
+        grid-template-columns: 5rem 1fr 1fr 5.5rem 6rem;
+        gap: 0.5rem;
+        align-items: center;
+        padding: 0.6rem 0.75rem;
+        border-bottom: 1px solid var(--border);
+        font-size: 0.83rem;
+        transition: background 0.1s;
+    }
+
+    .telem-row:last-child { border-bottom: none; }
+
+    .telem-row:hover { background: rgba(141, 255, 154, 0.03); }
+
+    .telem-track-primary {
+        font-weight: 600;
+        color: var(--text);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .telem-track-secondary {
+        font-size: 0.73rem;
+        color: var(--muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .telem-conf {
+        font-variant-numeric: tabular-nums;
+        font-size: 0.78rem;
+        color: var(--muted);
+    }
+
+    .telem-error {
+        font-size: 0.73rem;
+        color: var(--red);
+        grid-column: 2 / -1;
+        padding-top: 0.15rem;
+    }
+
+    /* ── Commit panel ────────────────────────────────────────── */
+    .commit-panel {
+        border-color: rgba(141, 255, 154, 0.25);
+    }
+
+    .commit-panel-meta {
+        font-size: 0.78rem;
+        color: var(--muted);
+        margin-top: 0.5rem;
+    }
+
+    @media (max-width: 700px) {
+        .run-stats { grid-template-columns: repeat(2, 1fr); }
+        .telem-header { display: none; }
+        .telem-row { grid-template-columns: 5rem 1fr; }
+        .telem-conf, .telem-row > :nth-child(3), .telem-row > :nth-child(5) { display: none; }
+    }
+</style>
+
+<p><a href="/">← Dashboard</a></p>
+<h1>Run Telemetry — #{{.Run.ID}}</h1>
+
+{{if .Flash}}<p class="flash">{{.Flash}}</p>{{end}}
+
+<!-- ── Stats strip ───────────────────────────────────────────── -->
+<div class="run-stats">
+    <div class="run-stat stat-total">
+        <span class="run-stat-value">{{len .Items}}</span>
+        <span class="run-stat-label">Total Tracks</span>
     </div>
+    <div class="run-stat stat-pending">
+        <span class="run-stat-value">{{.PendingCount}}</span>
+        <span class="run-stat-label">Pending Review</span>
+    </div>
+    <div class="run-stat">
+        <span class="run-stat-value" style="font-size:0.95rem; padding-top:0.3rem;">{{.Run.Status}}</span>
+        <span class="run-stat-label">Status</span>
+    </div>
+    <div class="run-stat">
+        <span class="run-stat-value" style="font-size:0.78rem; padding-top:0.25rem; color:var(--muted);">
+            {{.Run.MappingYouTubeTitle}}&nbsp;→&nbsp;{{.Run.MappingSpotifyTitle}}
+        </span>
+        <span class="run-stat-label">Route</span>
+    </div>
+</div>
 
-    <h2>Run Items</h2>
-    {{if .Items}}
-    <table>
-        <thead>
-            <tr>
-                <th>YouTube</th>
-                <th>Spotify Candidate</th>
-                <th>Confidence</th>
-                <th>Decision</th>
-                <th>Action</th>
-                <th>Error</th>
-            </tr>
-        </thead>
-        <tbody>
-            {{range .Items}}
-            <tr>
-                <td>{{.YouTubeTitle}}<br /><small>{{.YouTubeVideoID}}</small></td>
-                <td>{{.SpotifyTitle}} {{if .SpotifyArtist}}— {{.SpotifyArtist}}{{end}}<br /><small>{{.SpotifyTrackID}}</small></td>
-                <td>{{printf "%.2f" .Confidence}}</td>
-                <td>{{.Decision}}</td>
-                <td>{{.Action}}</td>
-                <td>{{.Error}}</td>
-            </tr>
+<!-- ── Meta / timing ─────────────────────────────────────────── -->
+<div class="panel" style="margin-bottom:1.5rem;">
+    <dl style="display:grid; grid-template-columns: max-content 1fr; gap:0.3rem 1.5rem; margin:0;">
+        <dt style="color:var(--muted); text-transform:uppercase; font-size:0.72rem; font-weight:600;">Started</dt>
+        <dd style="margin:0;">{{.Run.StartedAt}}</dd>
+
+        <dt style="color:var(--muted); text-transform:uppercase; font-size:0.72rem; font-weight:600;">Finished</dt>
+        <dd style="margin:0;">{{if .Run.FinishedAt}}{{.Run.FinishedAt}}{{else}}<span style="color:var(--muted)">—</span>{{end}}</dd>
+
+        <dt style="color:var(--muted); text-transform:uppercase; font-size:0.72rem; font-weight:600;">Run ID</dt>
+        <dd style="margin:0; color:var(--muted);">#{{.Run.ID}}</dd>
+    </dl>
+</div>
+
+<!-- ── Actions ───────────────────────────────────────────────── -->
+<div class="actions" style="margin-bottom:1.75rem;">
+    <div class="panel commit-panel" style="width:100%; padding:1rem 1.25rem;">
+        <div class="actions">
+            <form method="post" action="/runs/{{.Run.ID}}/confirm">
+                <button class="btn btn-primary" type="submit">Confirmed</button>
+            </form>
+            {{if gt .PendingCount 0}}
+            <a class="btn btn-ghost" href="/runs/{{.Run.ID}}/review">
+                Review {{.PendingCount}} Uncertain Match{{if gt .PendingCount 1}}es{{end}}
+            </a>
+            {{else}}
+            <a class="btn btn-ghost" href="/runs/{{.Run.ID}}/review">Review Matches</a>
             {{end}}
-        </tbody>
-    </table>
-    {{else}}
-    <p>No items recorded for this run yet.</p>
+        </div>
+        <p class="commit-panel-meta">
+            Committing will add all auto-matched and approved tracks to the Spotify destination playlist.
+            {{if gt .PendingCount 0}}
+            <span style="color:var(--amber);">{{.PendingCount}} track{{if gt .PendingCount 1}}s{{end}} still pending — review before committing.</span>
+            {{end}}
+        </p>
+    </div>
+</div>
+
+<!-- ── Telemetry log ─────────────────────────────────────────── -->
+<h2>Track Signal Log</h2>
+
+{{if .Items}}
+<div class="panel" style="padding:0; overflow:hidden;">
+    <div class="telem-header">
+        <span>Status</span>
+        <span>YouTube Source</span>
+        <span>Spotify Candidate</span>
+        <span>Confidence</span>
+        <span>Action</span>
+    </div>
+    {{range .Items}}
+    <div class="telem-row">
+        <!-- Status badge -->
+        <span>
+            {{if eq .Decision "approved"}}
+                <span class="badge badge-ok">approved</span>
+            {{else if eq .Decision "auto"}}
+                <span class="badge badge-ok">auto</span>
+            {{else if eq .Decision "rejected"}}
+                <span class="badge badge-danger">rejected</span>
+            {{else if eq .Decision "pending"}}
+                <span class="badge badge-warn">pending</span>
+            {{else}}
+                <span class="badge badge-muted">—</span>
+            {{end}}
+        </span>
+
+        <!-- YouTube source -->
+        <div>
+            <div class="telem-track-primary">{{if .YouTubeTitle}}{{.YouTubeTitle}}{{else}}{{.YouTubeVideoID}}{{end}}</div>
+            <div class="telem-track-secondary">{{.YouTubeVideoID}}</div>
+        </div>
+
+        <!-- Spotify candidate -->
+        <div>
+            {{if .SpotifyTitle}}
+            <div class="telem-track-primary">{{.SpotifyTitle}}{{if .SpotifyArtist}} <span style="color:var(--muted); font-weight:400;">— {{.SpotifyArtist}}</span>{{end}}</div>
+            <div class="telem-track-secondary">{{.SpotifyTrackID}}</div>
+            {{else}}
+            <div class="telem-track-secondary">no candidate</div>
+            {{end}}
+        </div>
+
+        <!-- Confidence -->
+        <div class="telem-conf">
+            {{if gt .Confidence 0.0}}{{printf "%.2f" .Confidence}}{{else}}<span style="color:var(--muted)">—</span>{{end}}
+        </div>
+
+        <!-- Action -->
+        <span>
+            {{if eq .Action "added"}}
+                <span class="badge badge-ok">added</span>
+            {{else if eq .Action "skipped_duplicate"}}
+                <span class="badge badge-muted">Skipped (duplicate)</span>
+            {{else if eq .Action "duplicate"}}
+                <span class="badge badge-muted">duplicate</span>
+            {{else if eq .Action "pending_review"}}
+                <span class="badge badge-warn">pending</span>
+            {{else if .Action}}
+                <span class="badge badge-muted">{{.Action}}</span>
+            {{else}}
+                <span class="badge badge-muted">—</span>
+            {{end}}
+        </span>
+
+        {{if .Error}}<div class="telem-error">⚠ {{.Error}}</div>{{end}}
+    </div>
     {{end}}
-</body>
-</html>
+</div>
+{{else}}
+<p style="color:var(--muted);">No items recorded for this run yet.</p>
+{{end}}
+{{end}}

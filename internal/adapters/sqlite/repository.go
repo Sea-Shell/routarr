@@ -154,6 +154,133 @@ ORDER BY id ASC
 	return mappings, nil
 }
 
+func (r *MappingRepository) GetSyncRunByID(ctx context.Context, runID int) (*domain.SyncRun, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("mapping repository is not initialized")
+	}
+
+	row := r.db.QueryRowContext(ctx, `
+SELECT id, mapping_id, started_at, finished_at, status
+FROM sync_runs
+WHERE id = ?
+`, runID)
+
+	var run domain.SyncRun
+	var finishedAt sql.NullTime
+	if err := row.Scan(&run.ID, &run.MappingID, &run.StartedAt, &finishedAt, &run.Status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get sync run by id: %w", err)
+	}
+
+	if finishedAt.Valid {
+		run.FinishedAt = &finishedAt.Time
+	}
+
+	return &run, nil
+}
+
+func (r *MappingRepository) ListSyncRunMatches(ctx context.Context, runID int) ([]domain.TrackMatch, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("mapping repository is not initialized")
+	}
+
+	rows, err := r.db.QueryContext(ctx, `
+SELECT
+	si.youtube_video_id,
+	COALESCE(tm.youtube_title, ''),
+	COALESCE(tm.spotify_track_id, si.selected_spotify_track_id, ''),
+	COALESCE(tm.spotify_track_title, ''),
+	COALESCE(tm.spotify_artist, ''),
+	COALESCE(tm.confidence, 0),
+	COALESCE(tm.decision, '')
+FROM sync_items si
+LEFT JOIN track_matches tm ON tm.youtube_video_id = si.youtube_video_id
+WHERE si.sync_run_id = ?
+ORDER BY si.id ASC
+`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("list sync run matches: %w", err)
+	}
+	defer rows.Close()
+
+	var matches []domain.TrackMatch
+	for rows.Next() {
+		var m domain.TrackMatch
+		var decision string
+		if err := rows.Scan(
+			&m.YTVideoID,
+			&m.YTTitle,
+			&m.SPTrackID,
+			&m.SPTitle,
+			&m.SPArtist,
+			&m.Confidence,
+			&decision,
+		); err != nil {
+			return nil, fmt.Errorf("scan sync run match: %w", err)
+		}
+		m.Decision = domain.MatchDecision(decision)
+		matches = append(matches, m)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sync run matches: %w", err)
+	}
+
+	return matches, nil
+}
+
+func (r *MappingRepository) UpdateSyncItemAction(ctx context.Context, runID int, ytVideoID, action, itemError string) error {
+	if r == nil || r.db == nil {
+		return fmt.Errorf("mapping repository is not initialized")
+	}
+
+	res, err := r.db.ExecContext(ctx, `
+UPDATE sync_items
+SET action = ?, error = ?
+WHERE sync_run_id = ? AND youtube_video_id = ?
+`, action, nullableString(itemError), runID, ytVideoID)
+	if err != nil {
+		return fmt.Errorf("update sync item action: %w", err)
+	}
+
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("get sync item action affected rows: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("sync item run=%d video=%q not found", runID, ytVideoID)
+	}
+
+	return nil
+}
+
+func (r *MappingRepository) UpdateSyncRunStatus(ctx context.Context, runID int, status string, finishedAt time.Time) error {
+	if r == nil || r.db == nil {
+		return fmt.Errorf("mapping repository is not initialized")
+	}
+
+	res, err := r.db.ExecContext(ctx, `
+UPDATE sync_runs
+SET status = ?, finished_at = ?
+WHERE id = ?
+`, status, finishedAt, runID)
+	if err != nil {
+		return fmt.Errorf("update sync run status: %w", err)
+	}
+
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("get sync run status affected rows: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("sync run id %d not found", runID)
+	}
+
+	return nil
+}
+
 type MatchRepository struct {
 	db *sql.DB
 }
