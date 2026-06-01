@@ -1,81 +1,218 @@
-<!doctype html>
-<html lang="en">
-<head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>yt2sp - Dashboard</title>
-    <style>
-        body { font-family: sans-serif; margin: 2rem; max-width: 960px; }
-        table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
-        th, td { border: 1px solid #ddd; padding: 0.5rem; text-align: left; }
-        .status-ok { color: #137333; font-weight: bold; }
-        .status-missing { color: #b3261e; font-weight: bold; }
-        .flash { background: #e8f0fe; padding: 0.75rem; border-radius: 6px; }
-        .actions a { margin-right: 0.5rem; }
-        .actions form { display: inline; margin-left: 0.5rem; }
-        .btn-danger { background: #b3261e; color: #fff; border: none; border-radius: 4px; padding: 0.4rem 0.6rem; cursor: pointer; }
-        .btn-danger:hover { background: #8d1f18; }
-    </style>
-</head>
-<body>
-    <h1>yt2sp</h1>
+{{define "title"}}yt2sp — Signal Console{{end}}
 
-    {{if .Flash}}
-    <p class="flash">{{.Flash}}</p>
-    {{end}}
+{{define "content"}}
+<style>
+    /* ── Provider strip ──────────────────────────────────────── */
+    .provider-strip {
+        display: flex;
+        align-items: center;
+        gap: 2rem;
+        flex-wrap: wrap;
+        padding: 0.7rem 1.25rem;
+        margin-bottom: 2rem;
+    }
 
-    <h2>Provider Connections</h2>
-    <ul>
-        <li>
-            YouTube:
-            {{if .YouTubeConnected}}<span class="status-ok">Connected</span>{{else}}<span class="status-missing">Not connected</span>{{end}}
-            {{if not .YouTubeConnected}}<a href="/oauth/youtube/connect">Connect</a>{{end}}
-        </li>
-        <li>
-            Spotify:
-            {{if .SpotifyConnected}}<span class="status-ok">Connected</span>{{else}}<span class="status-missing">Not connected</span>{{end}}
-            {{if not .SpotifyConnected}}<a href="/oauth/spotify/connect">Connect</a>{{end}}
-        </li>
-    </ul>
+    .provider-item {
+        display: flex;
+        align-items: center;
+        gap: 0.55rem;
+    }
 
-    <p>
-        <a href="/mappings/new">Create Mapping</a>
-    </p>
+    .provider-label {
+        font-size: 0.75rem;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+    }
 
-    <h2>Playlist Mappings</h2>
-    {{if .Mappings}}
-    <table>
-        <thead>
-            <tr>
-                <th>ID</th>
-                <th>YouTube</th>
-                <th>Spotify</th>
-                <th>Actions</th>
-            </tr>
-        </thead>
-        <tbody>
-            {{range .Mappings}}
-            <tr>
-                <td>{{.Mapping.ID}}</td>
-                <td>{{.Mapping.YTPlaylistTitle}} ({{.Mapping.YTPlaylistID}})</td>
-                <td>{{.Mapping.SPPlaylistTitle}} ({{.Mapping.SPPlaylistID}})</td>
-                <td class="actions">
-                    {{if gt .LatestRunID 0}}
-                    <a href="/runs/{{.LatestRunID}}">Last Sync</a>
-                    <a href="/runs/{{.LatestRunID}}/review">Review Uncertain</a>
-                    {{else}}
-                    <em>No runs yet</em>
-                    {{end}}
-                    <form method="post" action="/mappings/{{.Mapping.ID}}/delete" onsubmit="return confirm('Delete this mapping?');">
-                        <button class="btn-danger" type="submit">Delete Mapping</button>
-                    </form>
-                </td>
-            </tr>
+    /* ── Route cards ─────────────────────────────────────────── */
+    .route-grid {
+        display: flex;
+        flex-direction: column;
+        gap: 0;
+    }
+
+    .route-card {
+        display: flex;
+        flex-direction: column;
+        gap: 0.9rem;
+    }
+
+    .route-header {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .route-flow {
+        display: flex;
+        align-items: stretch;
+        gap: 0.75rem;
+    }
+
+    .route-node {
+        flex: 1;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        padding: 0.7rem 0.9rem;
+        min-width: 0;
+    }
+
+    .route-node-provider {
+        font-size: 0.67rem;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        margin-bottom: 0.3rem;
+    }
+
+    .route-node-yt .route-node-provider  { color: var(--red); }
+    .route-node-sp .route-node-provider  { color: var(--green); }
+
+    .route-node-title {
+        font-size: 0.88rem;
+        font-weight: 700;
+        color: var(--text);
+        margin-bottom: 0.2rem;
+        word-break: break-word;
+    }
+
+    .route-node-id {
+        font-size: 0.7rem;
+        color: var(--muted);
+        word-break: break-all;
+    }
+
+    .route-connector {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        color: var(--muted);
+        font-size: 1rem;
+        padding: 0 0.1rem;
+        letter-spacing: -0.05em;
+        user-select: none;
+    }
+
+    .route-actions {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        padding-top: 0.6rem;
+        border-top: 1px solid var(--border);
+    }
+
+    .route-actions form {
+        display: inline;
+        margin: 0;
+    }
+
+    .route-actions .spacer { flex: 1; }
+
+    .btn-review {
+        color: var(--amber);
+        border-color: rgba(255, 200, 87, 0.35);
+    }
+
+    .btn-review:hover { background: rgba(255, 200, 87, 0.08); }
+
+    /* ── Empty state ─────────────────────────────────────────── */
+    .empty-state {
+        text-align: center;
+        padding: 3rem 1.5rem;
+    }
+
+    .empty-state p {
+        color: var(--muted);
+        margin-bottom: 1rem;
+    }
+</style>
+
+<h1>Signal Console</h1>
+
+{{if .Flash}}
+<p class="flash">{{.Flash}}</p>
+{{end}}
+
+<!-- Provider status strip -->
+<div class="panel provider-strip">
+    <div class="provider-item">
+        <span class="provider-label">YouTube</span>
+        {{if .YouTubeConnected}}
+            <span class="badge badge-ok">Connected</span>
+        {{else}}
+            <span class="badge badge-danger">Not Connected</span>
+            <a href="/oauth/youtube/connect" class="btn btn-ghost" style="padding:0.2rem 0.6rem;font-size:0.78rem;">Connect</a>
+        {{end}}
+    </div>
+    <div class="provider-item">
+        <span class="provider-label">Spotify</span>
+        {{if .SpotifyConnected}}
+            <span class="badge badge-ok">Connected</span>
+        {{else}}
+            <span class="badge badge-danger">Not Connected</span>
+            <a href="/oauth/spotify/connect" class="btn btn-ghost" style="padding:0.2rem 0.6rem;font-size:0.78rem;">Connect</a>
+        {{end}}
+    </div>
+</div>
+
+<h2>Playlist Routes</h2>
+
+{{if .Mappings}}
+<div class="route-grid">
+    {{range .Mappings}}
+    <div class="route-card panel">
+
+        <!-- Card header: route ID + state badges -->
+        <div class="route-header">
+            <span class="badge badge-muted">Route #{{.Mapping.ID}}</span>
+            {{if gt .PendingReviewCount 0}}
+            <span class="badge badge-warn">{{.PendingReviewCount}} Pending Review</span>
             {{end}}
-        </tbody>
-    </table>
-    {{else}}
-    <p>No mappings yet. Create your first mapping to start syncing.</p>
+        </div>
+
+        <!-- Source → Destination nodes -->
+        <div class="route-flow">
+            <div class="route-node route-node-yt">
+                <div class="route-node-provider">YouTube</div>
+                <div class="route-node-title">{{.Mapping.YTPlaylistTitle}}</div>
+                <div class="route-node-id">{{.Mapping.YTPlaylistID}}</div>
+            </div>
+            <div class="route-connector">&#x2500;&#x2500;&#x25B6;</div>
+            <div class="route-node route-node-sp">
+                <div class="route-node-provider">Spotify</div>
+                <div class="route-node-title">{{.Mapping.SPPlaylistTitle}}</div>
+                <div class="route-node-id">{{.Mapping.SPPlaylistID}}</div>
+            </div>
+        </div>
+
+        <!-- Action bar -->
+        <div class="route-actions">
+            <form method="post" action="/mappings/{{.Mapping.ID}}/sync">
+                <button class="btn btn-primary" type="submit">&#9654; Run Dry Sync</button>
+            </form>
+            {{if gt .LatestRunID 0}}
+            <a href="/runs/{{.LatestRunID}}" class="btn btn-ghost">Latest Run</a>
+            {{if gt .PendingReviewCount 0}}
+            <a href="/runs/{{.LatestRunID}}/review" class="btn btn-ghost btn-review">Review {{.PendingReviewCount}}</a>
+            {{end}}
+            {{end}}
+            <span class="spacer"></span>
+            <form method="post" action="/mappings/{{.Mapping.ID}}/delete" onsubmit="return confirm('Delete route #{{.Mapping.ID}}?');">
+                <button class="btn btn-danger" type="submit">&#x2715; Delete</button>
+            </form>
+        </div>
+
+    </div>
     {{end}}
-</body>
-</html>
+</div>
+{{else}}
+<div class="panel empty-state">
+    <p>No routes configured yet.</p>
+    <a href="/mappings/new" class="btn btn-primary">+ Create Route</a>
+</div>
+{{end}}
+{{end}}

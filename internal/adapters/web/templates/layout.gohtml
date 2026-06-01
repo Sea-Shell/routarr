@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{block "title" .}}yt2sp{{end}}</title>
+    <style>
+        /* ── Signal Console Design System ───────────────────────── */
+        :root {
+            --bg:       #07100d;
+            --green:    #8dff9a;
+            --amber:    #ffc857;
+            --red:      #ff6b4a;
+            --muted:    #88a393;
+            --text:     #e8f6df;
+            --panel-bg: #0d1a14;
+            --border:   #1e3328;
+        }
+
+        *, *::before, *::after { box-sizing: border-box; }
+
+        html, body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: ui-monospace, 'IBM Plex Mono', monospace;
+            font-size: 0.9rem;
+            line-height: 1.6;
+            margin: 0;
+            padding: 0;
+        }
+
+        /* ── Shell ───────────────────────────────────────────────── */
+        .shell {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 2rem 1.5rem;
+        }
+
+        .nav {
+            display: flex;
+            align-items: center;
+            gap: 1.5rem;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .nav-brand {
+            color: var(--green);
+            font-weight: 700;
+            font-size: 1rem;
+            letter-spacing: 0.08em;
+            text-decoration: none;
+        }
+
+        .nav-brand::before { content: '▶ '; }
+
+        .nav-link {
+            color: var(--muted);
+            text-decoration: none;
+            font-size: 0.85rem;
+        }
+
+        .nav-link:hover { color: var(--text); }
+
+        /* ── Typography ──────────────────────────────────────────── */
+        h1, h2, h3 { margin-top: 0; font-weight: 700; }
+
+        h1 {
+            color: var(--green);
+            font-size: 1.3rem;
+            letter-spacing: 0.05em;
+            margin-bottom: 1.25rem;
+        }
+
+        h2 {
+            color: var(--text);
+            font-size: 1rem;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 0.4rem;
+            margin-bottom: 1rem;
+        }
+
+        a { color: var(--green); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+
+        small { color: var(--muted); }
+
+        p { margin: 0 0 0.75rem; }
+
+        /* ── Panels / Cards ──────────────────────────────────────── */
+        .panel {
+            background: var(--panel-bg);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 1.25rem 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        /* ── Badges ──────────────────────────────────────────────── */
+        .badge {
+            display: inline-block;
+            padding: 0.15rem 0.5rem;
+            border-radius: 3px;
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .badge-ok {
+            background: rgba(141, 255, 154, 0.10);
+            color: var(--green);
+            border: 1px solid rgba(141, 255, 154, 0.3);
+        }
+
+        .badge-warn {
+            background: rgba(255, 200, 87, 0.10);
+            color: var(--amber);
+            border: 1px solid rgba(255, 200, 87, 0.3);
+        }
+
+        .badge-danger {
+            background: rgba(255, 107, 74, 0.10);
+            color: var(--red);
+            border: 1px solid rgba(255, 107, 74, 0.3);
+        }
+
+        .badge-muted {
+            background: rgba(136, 163, 147, 0.10);
+            color: var(--muted);
+            border: 1px solid rgba(136, 163, 147, 0.3);
+        }
+
+        /* ── Buttons ─────────────────────────────────────────────── */
+        .btn {
+            display: inline-block;
+            padding: 0.45rem 0.9rem;
+            border-radius: 3px;
+            font-family: inherit;
+            font-size: 0.82rem;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            cursor: pointer;
+            border: 1px solid transparent;
+            text-decoration: none;
+            line-height: 1.4;
+        }
+
+        .btn:hover { text-decoration: none; opacity: 0.85; }
+
+        .btn-primary {
+            background: var(--green);
+            color: var(--bg);
+            border-color: var(--green);
+        }
+
+        .btn-ghost {
+            background: transparent;
+            color: var(--text);
+            border-color: var(--border);
+        }
+
+        .btn-ghost:hover { border-color: var(--muted); }
+
+        .btn-danger {
+            background: transparent;
+            color: var(--red);
+            border-color: rgba(255, 107, 74, 0.35);
+        }
+
+        .btn-danger:hover { background: rgba(255, 107, 74, 0.08); }
+
+        /* ── Flash & Error messages ──────────────────────────────── */
+        .flash {
+            background: rgba(141, 255, 154, 0.07);
+            border: 1px solid rgba(141, 255, 154, 0.22);
+            color: var(--green);
+            padding: 0.55rem 1rem;
+            border-radius: 3px;
+            margin-bottom: 1rem;
+        }
+
+        .error {
+            background: rgba(255, 107, 74, 0.07);
+            border: 1px solid rgba(255, 107, 74, 0.22);
+            color: var(--red);
+            padding: 0.55rem 1rem;
+            border-radius: 3px;
+            margin-bottom: 1rem;
+        }
+
+        /* ── Tables ──────────────────────────────────────────────── */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+        }
+
+        th {
+            text-align: left;
+            color: var(--muted);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            font-size: 0.7rem;
+            padding: 0.5rem 0.75rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        td {
+            padding: 0.55rem 0.75rem;
+            border-bottom: 1px solid var(--border);
+            vertical-align: top;
+        }
+
+        tr:last-child td { border-bottom: none; }
+
+        /* ── Forms ───────────────────────────────────────────────── */
+        label {
+            display: block;
+            margin-top: 1.1rem;
+            margin-bottom: 0.3rem;
+            font-size: 0.78rem;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+
+        input[type="text"],
+        input:not([type]),
+        input[type="hidden"] ~ input {
+            width: 100%;
+            max-width: 520px;
+            padding: 0.5rem 0.75rem;
+            background: var(--panel-bg);
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            color: var(--text);
+            font-family: inherit;
+            font-size: 0.9rem;
+        }
+
+        input[type="text"]:focus,
+        input:not([type]):focus { outline: none; border-color: var(--green); }
+
+        /* ── Utility ─────────────────────────────────────────────── */
+        .actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+        .actions form { display: inline; margin: 0; }
+
+        .status-ok      { color: var(--green); font-weight: 700; }
+        .status-missing { color: var(--red);   font-weight: 700; }
+    </style>
+</head>
+<body>
+    <div class="shell">
+        <nav class="nav">
+            <a class="nav-brand" href="/">yt2sp</a>
+            <a class="nav-link" href="/mappings/new">+ New Mapping</a>
+        </nav>
+        <main>
+            {{template "content" .}}
+        </main>
+    </div>
+</body>
+</html>

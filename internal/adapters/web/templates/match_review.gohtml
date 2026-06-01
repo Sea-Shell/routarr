@@ -1,61 +1,235 @@
-<!doctype html>
-<html lang="en">
-<head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>yt2sp - Match Review (Run {{.RunID}})</title>
-    <style>
-        body { font-family: sans-serif; margin: 2rem; max-width: 1080px; }
-        table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
-        th, td { border: 1px solid #ddd; padding: 0.5rem; text-align: left; vertical-align: top; }
-        .flash { background: #e8f0fe; padding: 0.75rem; border-radius: 6px; }
-        .error { color: #b3261e; font-weight: 600; }
-        form { display: inline; margin-right: 0.5rem; }
-    </style>
-</head>
-<body>
-    <h1>Uncertain Match Review - Run #{{.RunID}}</h1>
-    <p>
-        <a href="/runs/{{.RunID}}">Back to run details</a>
-        |
-        <a href="/">Dashboard</a>
-    </p>
+{{define "title"}}yt2sp — Signal Resolution (Run #{{.RunID}}){{end}}
 
-    {{if .Flash}}<p class="flash">{{.Flash}}</p>{{end}}
-    {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+{{define "content"}}
+<style>
+    /* ── Per-page styles ─────────────────────────────────────── */
+    .review-nav {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        margin-bottom: 1.5rem;
+        font-size: 0.82rem;
+        color: var(--muted);
+    }
 
-    {{if .Items}}
-    <table>
-        <thead>
-            <tr>
-                <th>YouTube</th>
-                <th>Spotify Candidate</th>
-                <th>Confidence</th>
-                <th>Decision</th>
-            </tr>
-        </thead>
-        <tbody>
-            {{range .Items}}
-            <tr>
-                <td>{{.YouTubeTitle}}<br /><small>{{.YouTubeVideoID}}</small></td>
-                <td>{{.SpotifyTitle}} {{if .SpotifyArtist}}— {{.SpotifyArtist}}{{end}}<br /><small>{{.SpotifyTrackID}}</small></td>
-                <td>{{printf "%.2f" .Confidence}}</td>
-                <td>
-                    <form method="post" action="/runs/{{$.RunID}}/review/approve">
-                        <input type="hidden" name="youtube_video_id" value="{{.YouTubeVideoID}}" />
-                        <button type="submit">Approve</button>
-                    </form>
-                    <form method="post" action="/runs/{{$.RunID}}/review/reject">
-                        <input type="hidden" name="youtube_video_id" value="{{.YouTubeVideoID}}" />
-                        <button type="submit">Reject</button>
-                    </form>
-                </td>
-            </tr>
-            {{end}}
-        </tbody>
-    </table>
-    {{else}}
-    <p>There are no uncertain matches for this run.</p>
+    .review-nav a { color: var(--green); }
+    .review-nav a:hover { text-decoration: underline; }
+    .review-nav-sep { color: var(--border); }
+
+    /* ── Review card ─────────────────────────────────────────── */
+    .review-card {
+        background: var(--panel-bg);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        margin-bottom: 1rem;
+        overflow: hidden;
+    }
+
+    .review-card-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0.55rem 1rem;
+        border-bottom: 1px solid var(--border);
+        background: rgba(255,255,255,0.015);
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+    }
+
+    .review-card-conf {
+        font-variant-numeric: tabular-nums;
+        font-size: 0.75rem;
+    }
+
+    .review-card-conf-value {
+        font-weight: 700;
+    }
+
+    /* confidence tint: high ≥0.8, mid 0.4–0.8, low <0.4 */
+    .conf-high { color: var(--green); }
+    .conf-mid  { color: var(--amber); }
+    .conf-low  { color: var(--red);   }
+
+    /* ── Compare grid ────────────────────────────────────────── */
+    .compare-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+    }
+
+    .compare-side {
+        padding: 1rem 1.25rem;
+    }
+
+    .compare-side + .compare-side {
+        border-left: 1px solid var(--border);
+    }
+
+    .compare-side-label {
+        font-size: 0.66rem;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--muted);
+        margin-bottom: 0.6rem;
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+    }
+
+    .compare-title {
+        font-size: 0.95rem;
+        font-weight: 700;
+        color: var(--text);
+        line-height: 1.3;
+        margin-bottom: 0.25rem;
+    }
+
+    .compare-meta {
+        font-size: 0.76rem;
+        color: var(--muted);
+        line-height: 1.5;
+    }
+
+    /* ── Decision row ────────────────────────────────────────── */
+    .decision-row {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.75rem 1.25rem;
+        border-top: 1px solid var(--border);
+        background: rgba(255,255,255,0.01);
+    }
+
+    /* Approve: solid neon-lime */
+    .btn-approve {
+        background: var(--green);
+        color: var(--bg);
+        border-color: var(--green);
+        font-weight: 700;
+        letter-spacing: 0.04em;
+    }
+
+    .btn-approve:hover {
+        opacity: 0.88;
+        text-decoration: none;
+    }
+
+    /* Reject: solid red-orange */
+    .btn-reject {
+        background: var(--red);
+        color: #fff;
+        border-color: var(--red);
+        font-weight: 700;
+        letter-spacing: 0.04em;
+    }
+
+    .btn-reject:hover {
+        opacity: 0.88;
+        text-decoration: none;
+    }
+
+    @media (max-width: 580px) {
+        .compare-grid { grid-template-columns: 1fr; }
+        .compare-side + .compare-side {
+            border-left: none;
+            border-top: 1px solid var(--border);
+        }
+    }
+</style>
+
+<!-- ── Back navigation ────────────────────────────────────────── -->
+<nav class="review-nav">
+    <a href="/runs/{{.RunID}}">← Run Telemetry #{{.RunID}}</a>
+    <span class="review-nav-sep">·</span>
+    <a href="/">Dashboard</a>
+</nav>
+
+<h1>Signal Resolution — Run #{{.RunID}}</h1>
+
+<p style="color:var(--muted); font-size:0.83rem; margin-bottom:1.5rem;">
+    Review each uncertain match. Approve tracks you want synced. Reject tracks that are wrong matches.
+    Unreviewed items will remain pending.
+</p>
+
+{{if .Flash}}<p class="flash">{{.Flash}}</p>{{end}}
+{{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+
+{{if .Items}}
+    {{range .Items}}
+    <div class="review-card">
+
+        <!-- ── Card header: index + confidence ───────────────── -->
+        <div class="review-card-header">
+            <span>Uncertain Match</span>
+            <span class="review-card-conf">
+                Confidence:&nbsp;
+                {{if ge .Confidence 0.8}}
+                    <span class="review-card-conf-value conf-high">{{printf "%.2f" .Confidence}}</span>
+                {{else if ge .Confidence 0.4}}
+                    <span class="review-card-conf-value conf-mid">{{printf "%.2f" .Confidence}}</span>
+                {{else}}
+                    <span class="review-card-conf-value conf-low">{{printf "%.2f" .Confidence}}</span>
+                {{end}}
+            </span>
+        </div>
+
+        <!-- ── Side-by-side comparison ───────────────────────── -->
+        <div class="compare-grid">
+
+            <!-- YouTube source -->
+            <div class="compare-side">
+                <div class="compare-side-label">
+                    <span class="badge badge-ok">Source</span>
+                    YouTube
+                </div>
+                <div class="compare-title">{{.YouTubeTitle}}</div>
+                <div class="compare-meta">{{.YouTubeVideoID}}</div>
+            </div>
+
+            <!-- Spotify candidate -->
+            <div class="compare-side">
+                <div class="compare-side-label">
+                    <span class="badge badge-muted">Candidate</span>
+                    Spotify
+                </div>
+                {{if .SpotifyTitle}}
+                <div class="compare-title">{{.SpotifyTitle}}</div>
+                <div class="compare-meta">
+                    {{if .SpotifyArtist}}{{.SpotifyArtist}}<br />{{end}}
+                    {{.SpotifyTrackID}}
+                </div>
+                {{else}}
+                <div class="compare-meta" style="color:var(--muted);">No candidate found</div>
+                {{end}}
+            </div>
+
+        </div>
+
+        <!-- ── Decision buttons ───────────────────────────────── -->
+        <div class="decision-row">
+            <form method="post" action="/runs/{{$.RunID}}/review/approve">
+                <input type="hidden" name="youtube_video_id" value="{{.YouTubeVideoID}}" />
+                <button class="btn btn-approve" type="submit">Approve</button>
+            </form>
+            <form method="post" action="/runs/{{$.RunID}}/review/reject">
+                <input type="hidden" name="youtube_video_id" value="{{.YouTubeVideoID}}" />
+                <button class="btn btn-reject" type="submit">Reject</button>
+            </form>
+            <span style="font-size:0.73rem; color:var(--muted); margin-left:0.25rem;">
+                Approve to include in sync &nbsp;·&nbsp; Reject to skip this track
+            </span>
+        </div>
+
+    </div>
     {{end}}
-</body>
-</html>
+{{else}}
+<div class="panel" style="text-align:center; padding:2rem;">
+    <p style="color:var(--green); margin-bottom:0.5rem; font-weight:700;">All signals resolved.</p>
+    <p style="color:var(--muted); margin:0; font-size:0.85rem;">No uncertain matches remain for this run.</p>
+    <p style="margin-top:1rem;">
+        <a class="btn btn-ghost" href="/runs/{{.RunID}}">← Back to Run Telemetry</a>
+    </p>
+</div>
+{{end}}
+{{end}}

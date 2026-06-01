@@ -1,5 +1,6 @@
 # Binaries
 bin/
+yt2sp
 *.exe
 *.exe~
 *.dll

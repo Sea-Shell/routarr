@@ -15,6 +15,11 @@ import (
 
 const defaultBaseURL = "https://api.spotify.com"
 
+// maxPages caps pagination in GetPlaylistTracks to prevent an infinite loop
+// caused by a malformed or adversarial "next" response.
+// Spotify allows at most 10 000 tracks at 100 per page → 100 pages.
+const maxPages = 100
+
 var _ ports.SpotifyService = (*Adapter)(nil)
 
 type Adapter struct {
@@ -97,6 +102,97 @@ func (a *Adapter) SearchTrack(ctx context.Context, query string) (*domain.TrackM
 	}, nil
 }
 
+func (a *Adapter) GetPlaylistTracks(ctx context.Context, playlistID string) ([]string, error) {
+	if a == nil || a.client == nil {
+		return nil, fmt.Errorf("spotify adapter is not initialized")
+	}
+	if a.token == "" {
+		return nil, fmt.Errorf("spotify oauth token is empty")
+	}
+	if strings.TrimSpace(playlistID) == "" {
+		return nil, fmt.Errorf("playlist id is empty")
+	}
+
+	// Parse baseURL once so we can validate every "next" URL against it (SSRF guard).
+	baseURL, err := url.Parse(a.baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse spotify base url: %w", err)
+	}
+
+	endpoint, err := url.Parse(a.baseURL + "/v1/playlists/" + url.PathEscape(playlistID) + "/tracks")
+	if err != nil {
+		return nil, fmt.Errorf("build spotify playlist tracks endpoint: %w", err)
+	}
+
+	params := endpoint.Query()
+	params.Set("fields", "items(track(id)),next")
+	params.Set("limit", "100")
+	endpoint.RawQuery = params.Encode()
+
+	var trackIDs []string
+	page := 0
+	for {
+		// Guard against an infinite loop caused by a response that always
+		// returns a non-empty "next" URL.
+		if page >= maxPages {
+			return nil, fmt.Errorf("GetPlaylistTracks: exceeded max pagination pages (%d) for playlist %s", maxPages, playlistID)
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+		if err != nil {
+			return nil, fmt.Errorf("create spotify playlist tracks request: %w", err)
+		}
+		a.setAuth(req)
+
+		resp, err := a.client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("request spotify playlist tracks: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			errBody, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("spotify get playlist tracks failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(errBody)))
+		}
+
+		var payload playlistTracksResponse
+		decodeErr := json.NewDecoder(resp.Body).Decode(&payload)
+		_ = resp.Body.Close()
+		if decodeErr != nil {
+			return nil, fmt.Errorf("decode spotify playlist tracks response: %w", decodeErr)
+		}
+
+		for _, item := range payload.Items {
+			id := strings.TrimSpace(item.Track.ID)
+			if id == "" {
+				continue
+			}
+			trackIDs = append(trackIDs, id)
+		}
+
+		// *string makes absent (JSON null) vs present-but-empty explicit.
+		if payload.Next == nil || strings.TrimSpace(*payload.Next) == "" {
+			break
+		}
+
+		nextEndpoint, err := url.Parse(*payload.Next)
+		if err != nil {
+			return nil, fmt.Errorf("parse spotify playlist next page url: %w", err)
+		}
+
+		// Reject any "next" URL whose host doesn't match the configured base URL
+		// to prevent following an attacker-controlled redirect (SSRF).
+		if nextEndpoint.Host != baseURL.Host {
+			return nil, fmt.Errorf("GetPlaylistTracks: next page url host %q does not match expected %q", nextEndpoint.Host, baseURL.Host)
+		}
+
+		endpoint = nextEndpoint
+		page++
+	}
+
+	return trackIDs, nil
+}
+
 func (a *Adapter) AddTrackToPlaylist(ctx context.Context, playlistID, trackID string) error {
 	if a == nil || a.client == nil {
 		return fmt.Errorf("spotify adapter is not initialized")
@@ -153,4 +249,13 @@ type searchResponse struct {
 			} `json:"artists"`
 		} `json:"items"`
 	} `json:"tracks"`
+}
+
+type playlistTracksResponse struct {
+	Items []struct {
+		Track struct {
+			ID string `json:"id"`
+		} `json:"track"`
+	} `json:"items"`
+	Next *string `json:"next"` // pointer: JSON null → nil (absent), vs non-nil empty string (present but empty)
 }

@@ -236,6 +236,70 @@ VALUES(?, ?, ?, ?)
 	}
 }
 
+func TestPendingCountInIndex(t *testing.T) {
+	t.Parallel()
+
+	db, _, mux := newTestHandler(t)
+	repo := sqlite.NewMappingRepository(db)
+
+	// Insert a playlist mapping.
+	mapping := &domain.PlaylistMapping{
+		YTPlaylistID:    "yt-pending-1",
+		YTPlaylistTitle: "YT Pending Playlist",
+		SPPlaylistID:    "sp-pending-1",
+		SPPlaylistTitle: "SP Pending Playlist",
+	}
+	if err := repo.Save(t.Context(), mapping); err != nil {
+		t.Fatalf("save mapping: %v", err)
+	}
+
+	// Insert a completed sync run for that mapping.
+	res, err := db.ExecContext(t.Context(), `
+INSERT INTO sync_runs(mapping_id, started_at, finished_at, status)
+VALUES(?, ?, ?, ?)
+`, mapping.ID, time.Now().UTC().Add(-5*time.Minute), time.Now().UTC(), "completed")
+	if err != nil {
+		t.Fatalf("insert sync run: %v", err)
+	}
+	runID, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("last insert id for sync run: %v", err)
+	}
+
+	// Insert two track_matches with decision = "pending".
+	for _, vid := range []string{"yt-vid-p1", "yt-vid-p2"} {
+		_, err = db.ExecContext(t.Context(), `
+INSERT INTO track_matches(youtube_video_id, youtube_title, confidence, decision, created_at)
+VALUES(?, ?, ?, ?, ?)
+`, vid, "Some Title "+vid, 0.55, string(domain.MatchPending), time.Now().UTC())
+		if err != nil {
+			t.Fatalf("insert track match %s: %v", vid, err)
+		}
+	}
+
+	// Insert sync_items linking both track_matches to the run.
+	for _, vid := range []string{"yt-vid-p1", "yt-vid-p2"} {
+		_, err = db.ExecContext(t.Context(), `
+INSERT INTO sync_items(sync_run_id, youtube_video_id, action)
+VALUES(?, ?, ?)
+`, runID, vid, "pending_review")
+		if err != nil {
+			t.Fatalf("insert sync item %s: %v", vid, err)
+		}
+	}
+
+	// GET / and check that the pending count badge is rendered.
+	resp := performRequest(t, mux, http.MethodGet, "/", "", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET / status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	body := readBody(t, resp)
+	if !strings.Contains(body, "2 Pending Review") {
+		t.Fatalf("index body missing pending review badge: %q", body)
+	}
+}
+
 func TestOAuthConnectFlow(t *testing.T) {
 	t.Parallel()
 
@@ -301,6 +365,7 @@ func newTestHandler(t *testing.T, syncServices ...syncCommitter) (*sql.DB, *Hand
 	h, err := NewHandler(
 		db,
 		sqlite.NewMappingRepository(db),
+		"http://localhost:8080",
 		"test-yt-client-id",
 		"test-yt-secret",
 		"test-sp-client-id",

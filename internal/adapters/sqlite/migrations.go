@@ -95,6 +95,12 @@ CREATE INDEX IF NOT EXISTS idx_sync_runs_mapping_id ON sync_runs(mapping_id);
 CREATE INDEX IF NOT EXISTS idx_sync_items_sync_run_id ON sync_items(sync_run_id);
 CREATE INDEX IF NOT EXISTS idx_sync_items_youtube_video_id ON sync_items(youtube_video_id);`,
 	},
+	{
+		version: 7,
+		name:    "idx_sync_runs_mapping_id_composite",
+		query: `
+CREATE INDEX IF NOT EXISTS idx_sync_runs_mapping_id ON sync_runs(mapping_id, id);`,
+	},
 }
 
 func Open(path string) (*sql.DB, error) {
