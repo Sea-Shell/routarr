@@ -2,8 +2,10 @@ package web
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"embed"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"html/template"
@@ -12,23 +14,36 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bateau84/yt2sp/internal/adapters/spotify"
+	"github.com/bateau84/yt2sp/internal/adapters/sqlite"
+	"github.com/bateau84/yt2sp/internal/app"
 	"github.com/bateau84/yt2sp/internal/domain"
+	"github.com/bateau84/yt2sp/internal/matcher"
 	"github.com/bateau84/yt2sp/internal/ports"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
+	spotifyoauth "golang.org/x/oauth2/spotify"
 )
 
 const (
-	providerYouTube    = "youtube"
-	providerSpotify    = "spotify"
-	runStatusConfirmed = "confirmed"
+	providerYouTube = "youtube"
+	providerSpotify = "spotify"
 )
 
 //go:embed templates/*.gohtml
 var templateFS embed.FS
 
 type Handler struct {
-	db          *sql.DB
-	mappingRepo ports.MappingRepository
-	templates   *template.Template
+	db                  *sql.DB
+	mappingRepo         ports.MappingRepository
+	syncService         syncCommitter
+	templates           *template.Template
+	oauthConfigs        map[string]*oauth2.Config
+	oauthTokenExchanger func(ctx context.Context, conf *oauth2.Config, code string) (*oauth2.Token, error)
+}
+
+type syncCommitter interface {
+	Commit(ctx context.Context, syncRunID int) error
 }
 
 type indexViewData struct {
@@ -93,12 +108,17 @@ type matchReviewData struct {
 	Error string
 }
 
-func NewHandler(db *sql.DB, mappingRepo ports.MappingRepository) (*Handler, error) {
+func NewHandler(db *sql.DB, mappingRepo ports.MappingRepository, ytClientID, ytSecret, spClientID, spSecret string, syncServices ...syncCommitter) (*Handler, error) {
 	if db == nil {
 		return nil, fmt.Errorf("web handler db is nil")
 	}
 	if mappingRepo == nil {
 		return nil, fmt.Errorf("web handler mapping repo is nil")
+	}
+
+	var syncService syncCommitter
+	if len(syncServices) > 0 {
+		syncService = syncServices[0]
 	}
 
 	tmpl, err := template.ParseFS(templateFS, "templates/*.gohtml")
@@ -109,7 +129,33 @@ func NewHandler(db *sql.DB, mappingRepo ports.MappingRepository) (*Handler, erro
 	return &Handler{
 		db:          db,
 		mappingRepo: mappingRepo,
+		syncService: syncService,
 		templates:   tmpl,
+		oauthConfigs: map[string]*oauth2.Config{
+			providerYouTube: {
+				ClientID:     strings.TrimSpace(ytClientID),
+				ClientSecret: strings.TrimSpace(ytSecret),
+				Endpoint:     google.Endpoint,
+				RedirectURL:  "http://localhost:8080/oauth/youtube/callback",
+				Scopes: []string{
+					"https://www.googleapis.com/auth/youtube.readonly",
+				},
+			},
+			providerSpotify: {
+				ClientID:     strings.TrimSpace(spClientID),
+				ClientSecret: strings.TrimSpace(spSecret),
+				Endpoint:     spotifyoauth.Endpoint,
+				RedirectURL:  "http://localhost:8080/oauth/spotify/callback",
+				Scopes: []string{
+					"playlist-read-private",
+					"playlist-modify-private",
+					"playlist-modify-public",
+				},
+			},
+		},
+		oauthTokenExchanger: func(ctx context.Context, conf *oauth2.Config, code string) (*oauth2.Token, error) {
+			return conf.Exchange(ctx, code)
+		},
 	}, nil
 }
 
@@ -117,6 +163,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /", h.index)
 	mux.HandleFunc("GET /mappings/new", h.createMappingForm)
 	mux.HandleFunc("POST /mappings", h.createMapping)
+	mux.HandleFunc("POST /mappings/{id}/delete", h.deleteMapping)
 	mux.HandleFunc("GET /runs/{id}", h.syncDetail)
 	mux.HandleFunc("POST /runs/{id}/confirm", h.confirmRun)
 	mux.HandleFunc("GET /runs/{id}/review", h.matchReview)
@@ -216,6 +263,32 @@ func (h *Handler) createMapping(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/?flash=Mapping+created", http.StatusSeeOther)
 }
 
+func (h *Handler) deleteMapping(w http.ResponseWriter, r *http.Request) {
+	mappingID, ok := parsePathInt(r.PathValue("id"))
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	res, err := h.db.ExecContext(r.Context(), `DELETE FROM playlist_mappings WHERE id = ?`, mappingID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("delete mapping: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	affected, err := res.RowsAffected()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("delete mapping affected rows: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if affected == 0 {
+		http.NotFound(w, r)
+		return
+	}
+
+	http.Redirect(w, r, "/?flash=Mapping+deleted", http.StatusSeeOther)
+}
+
 func (h *Handler) syncDetail(w http.ResponseWriter, r *http.Request) {
 	runID, ok := parsePathInt(r.PathValue("id"))
 	if !ok {
@@ -260,27 +333,62 @@ func (h *Handler) confirmRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := h.db.ExecContext(r.Context(), `
-UPDATE sync_runs
-SET status = ?, finished_at = COALESCE(finished_at, ?)
-WHERE id = ?
-`, runStatusConfirmed, time.Now().UTC(), runID)
+	syncService, err := h.getSyncService(r.Context())
 	if err != nil {
 		http.Error(w, fmt.Sprintf("confirm run: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	affected, err := res.RowsAffected()
-	if err != nil {
-		http.Error(w, fmt.Sprintf("confirm run affected rows: %v", err), http.StatusInternalServerError)
-		return
-	}
-	if affected == 0 {
-		http.NotFound(w, r)
+	if err := syncService.Commit(r.Context(), runID); err != nil {
+		if errors.Is(err, app.ErrSyncRunNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+
+		http.Error(w, fmt.Sprintf("confirm run: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	http.Redirect(w, r, fmt.Sprintf("/runs/%d?flash=Run+confirmed", runID), http.StatusSeeOther)
+}
+
+func (h *Handler) getSyncService(ctx context.Context) (syncCommitter, error) {
+	if h.syncService != nil {
+		return h.syncService, nil
+	}
+
+	token, err := h.getProviderToken(ctx, providerSpotify)
+	if err != nil {
+		return nil, err
+	}
+
+	spotifyService := spotify.NewAdapter(http.DefaultClient, token)
+	matchRepo := sqlite.NewMatchRepository(h.db)
+	h.syncService = app.NewSyncService(nil, spotifyService, h.mappingRepo, matchRepo, matcher.NewMatcher())
+
+	return h.syncService, nil
+}
+
+func (h *Handler) getProviderToken(ctx context.Context, provider string) (string, error) {
+	var accessToken sql.NullString
+	err := h.db.QueryRowContext(ctx, `
+SELECT access_token
+FROM oauth_tokens
+WHERE provider = ?
+`, provider).Scan(&accessToken)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("oauth token for provider %q not found", provider)
+	}
+	if err != nil {
+		return "", fmt.Errorf("query oauth token for provider %q: %w", provider, err)
+	}
+
+	token := strings.TrimSpace(accessToken.String)
+	if token == "" {
+		return "", fmt.Errorf("oauth token for provider %q is empty", provider)
+	}
+
+	return token, nil
 }
 
 func (h *Handler) matchReview(w http.ResponseWriter, r *http.Request) {
@@ -370,12 +478,34 @@ func (h *Handler) oauthConnect(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	conf, ok := h.oauthConfigForProvider(provider)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if strings.TrimSpace(conf.ClientID) == "" || strings.TrimSpace(conf.ClientSecret) == "" {
+		http.Error(w, fmt.Sprintf("oauth credentials for %s are not configured", provider), http.StatusBadRequest)
+		return
+	}
 
-	callbackPath := fmt.Sprintf("/oauth/%s/callback", provider)
-	callbackURL := h.absoluteURL(r, callbackPath)
-	redirectURL := callbackURL + "?code=stub-auth-code&state=stub-state"
+	state, err := newOAuthState()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("generate oauth state: %v", err), http.StatusInternalServerError)
+		return
+	}
 
-	http.Redirect(w, r, redirectURL, http.StatusFound)
+	http.SetCookie(w, &http.Cookie{
+		Name:     oauthStateCookieName(provider),
+		Value:    state,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   false,
+		SameSite: http.SameSiteLaxMode,
+		Expires:  time.Now().UTC().Add(15 * time.Minute),
+	})
+
+	authURL := conf.AuthCodeURL(state, oauth2.AccessTypeOffline)
+	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
 func (h *Handler) oauthCallback(w http.ResponseWriter, r *http.Request) {
@@ -384,13 +514,50 @@ func (h *Handler) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-
-	if strings.TrimSpace(r.URL.Query().Get("code")) == "" {
-		http.Error(w, "missing oauth code", http.StatusBadRequest)
+	conf, ok := h.oauthConfigForProvider(provider)
+	if !ok {
+		http.NotFound(w, r)
 		return
 	}
 
-	_, err := h.db.ExecContext(r.Context(), `
+	code := strings.TrimSpace(r.URL.Query().Get("code"))
+	if code == "" {
+		http.Error(w, "missing oauth code", http.StatusBadRequest)
+		return
+	}
+	state := strings.TrimSpace(r.URL.Query().Get("state"))
+	if state == "" {
+		http.Error(w, "missing oauth state", http.StatusBadRequest)
+		return
+	}
+
+	stateCookie, err := r.Cookie(oauthStateCookieName(provider))
+	if err != nil {
+		http.Error(w, "missing oauth state cookie", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(stateCookie.Value) != state {
+		http.Error(w, "invalid oauth state", http.StatusBadRequest)
+		return
+	}
+
+	token, err := h.oauthTokenExchanger(r.Context(), conf, code)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("exchange oauth token: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	scopes := strings.TrimSpace(strings.Join(conf.Scopes, " "))
+	if tokenScopes, ok := token.Extra("scope").(string); ok && strings.TrimSpace(tokenScopes) != "" {
+		scopes = strings.TrimSpace(tokenScopes)
+	}
+
+	var expiry any
+	if !token.Expiry.IsZero() {
+		expiry = token.Expiry.UTC()
+	}
+
+	_, err = h.db.ExecContext(r.Context(), `
 INSERT INTO oauth_tokens(provider, access_token, refresh_token, expiry, scopes, updated_at)
 VALUES (?, ?, ?, ?, ?, ?)
 ON CONFLICT(provider) DO UPDATE SET
@@ -399,11 +566,21 @@ ON CONFLICT(provider) DO UPDATE SET
 	expiry = excluded.expiry,
 	scopes = excluded.scopes,
 	updated_at = excluded.updated_at
-`, provider, "stub-access-token", "", time.Now().UTC().Add(24*time.Hour), "stub", time.Now().UTC())
+`, provider, token.AccessToken, nullableString(token.RefreshToken), expiry, nullableString(scopes), time.Now().UTC())
 	if err != nil {
 		http.Error(w, fmt.Sprintf("save oauth token: %v", err), http.StatusInternalServerError)
 		return
 	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     oauthStateCookieName(provider),
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   false,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+	})
 
 	http.Redirect(w, r, fmt.Sprintf("/?flash=%s+connected", provider), http.StatusSeeOther)
 }
@@ -602,17 +779,6 @@ func (h *Handler) render(w http.ResponseWriter, templateName string, data any) {
 	}
 }
 
-func (h *Handler) absoluteURL(r *http.Request, path string) string {
-	scheme := "http"
-	if forwardedProto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); forwardedProto != "" {
-		scheme = forwardedProto
-	} else if r.TLS != nil {
-		scheme = "https"
-	}
-
-	return fmt.Sprintf("%s://%s%s", scheme, r.Host, path)
-}
-
 func normalizeProvider(provider string) (string, bool) {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	if provider == providerYouTube || provider == providerSpotify {
@@ -634,4 +800,39 @@ func parsePathInt(v string) (int, bool) {
 	}
 
 	return n, true
+}
+
+func (h *Handler) oauthConfigForProvider(provider string) (*oauth2.Config, bool) {
+	if h == nil || h.oauthConfigs == nil {
+		return nil, false
+	}
+
+	conf, ok := h.oauthConfigs[provider]
+	if !ok || conf == nil {
+		return nil, false
+	}
+
+	return conf, true
+}
+
+func newOAuthState() (string, error) {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("read random bytes: %w", err)
+	}
+
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+func oauthStateCookieName(provider string) string {
+	return fmt.Sprintf("oauth_state_%s", provider)
+}
+
+func nullableString(v string) any {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return nil
+	}
+
+	return v
 }
