@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/bateau84/yt2sp/internal/adapters/sqlite"
 	"github.com/bateau84/yt2sp/internal/domain"
+	"golang.org/x/oauth2"
 )
 
 func TestCreateMappingAndIndex(t *testing.T) {
@@ -60,10 +62,42 @@ func TestCreateMappingAndIndex(t *testing.T) {
 	_ = handler
 }
 
-func TestSyncDetailAndMatchReviewFlow(t *testing.T) {
+func TestDeleteMapping(t *testing.T) {
 	t.Parallel()
 
 	db, _, mux := newTestHandler(t)
+	repo := sqlite.NewMappingRepository(db)
+
+	mapping := &domain.PlaylistMapping{
+		YTPlaylistID:    "yt-delete-1",
+		YTPlaylistTitle: "YT Delete",
+		SPPlaylistID:    "sp-delete-1",
+		SPPlaylistTitle: "SP Delete",
+	}
+	if err := repo.Save(t.Context(), mapping); err != nil {
+		t.Fatalf("save mapping: %v", err)
+	}
+
+	resp := performRequest(t, mux, http.MethodPost, fmt.Sprintf("/mappings/%d/delete", mapping.ID), "", "")
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("POST /mappings/{id}/delete status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
+	}
+
+	remaining, err := repo.List(t.Context())
+	if err != nil {
+		t.Fatalf("list mappings: %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("mapping count = %d, want 0", len(remaining))
+	}
+}
+
+func TestSyncDetailAndMatchReviewFlow(t *testing.T) {
+	t.Parallel()
+
+	var runID int64
+	committer := &syncCommitterStub{}
+	db, _, mux := newTestHandler(t, committer)
 	repo := sqlite.NewMappingRepository(db)
 
 	mapping := &domain.PlaylistMapping{
@@ -84,9 +118,32 @@ VALUES(?, ?, ?)
 	if err != nil {
 		t.Fatalf("insert sync run: %v", err)
 	}
-	runID, err := res.LastInsertId()
+	runID, err = res.LastInsertId()
 	if err != nil {
 		t.Fatalf("last run id: %v", err)
+	}
+	committer.commitFn = func(ctx context.Context, gotRunID int) error {
+		if int64(gotRunID) != runID {
+			return fmt.Errorf("commit run id = %d, want %d", gotRunID, runID)
+		}
+
+		if _, err := db.ExecContext(ctx, `
+UPDATE sync_items
+SET action = ?, error = NULL
+WHERE sync_run_id = ? AND youtube_video_id = ?
+`, "added", runID, "yt-video-1"); err != nil {
+			return fmt.Errorf("update sync item from commit stub: %w", err)
+		}
+
+		if _, err := db.ExecContext(ctx, `
+UPDATE sync_runs
+SET status = ?, finished_at = ?
+WHERE id = ?
+`, "completed", time.Now().UTC(), runID); err != nil {
+			return fmt.Errorf("update sync run from commit stub: %w", err)
+		}
+
+		return nil
 	}
 
 	_, err = db.ExecContext(t.Context(), `
@@ -152,16 +209,47 @@ VALUES(?, ?, ?, ?)
 		t.Fatalf("decision = %q, want %q", decision, domain.MatchApproved)
 	}
 
+	setProviderConnected(t, db, providerSpotify)
+
 	confirmResp := performRequest(t, mux, http.MethodPost, fmt.Sprintf("/runs/%d/confirm", runID), "", "")
 	if confirmResp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("POST /runs/{id}/confirm status = %d, want %d", confirmResp.StatusCode, http.StatusSeeOther)
 	}
+
+	var runStatus string
+	if err := db.QueryRowContext(t.Context(), `SELECT status FROM sync_runs WHERE id = ?`, runID).Scan(&runStatus); err != nil {
+		t.Fatalf("query run status: %v", err)
+	}
+	if runStatus != "completed" {
+		t.Fatalf("run status = %q, want completed", runStatus)
+	}
+
+	var action string
+	if err := db.QueryRowContext(t.Context(), `SELECT action FROM sync_items WHERE sync_run_id = ? AND youtube_video_id = ?`, runID, "yt-video-1").Scan(&action); err != nil {
+		t.Fatalf("query sync item action: %v", err)
+	}
+	if action != "added" {
+		t.Fatalf("sync item action = %q, want added", action)
+	}
+	if len(committer.calls) != 1 || committer.calls[0] != int(runID) {
+		t.Fatalf("commit calls = %#v, want [%d]", committer.calls, runID)
+	}
 }
 
-func TestOAuthStubConnectFlow(t *testing.T) {
+func TestOAuthConnectFlow(t *testing.T) {
 	t.Parallel()
 
-	db, _, mux := newTestHandler(t)
+	db, handler, mux := newTestHandler(t)
+	handler.oauthTokenExchanger = func(ctx context.Context, conf *oauth2.Config, code string) (*oauth2.Token, error) {
+		if code != "auth-code" {
+			return nil, fmt.Errorf("oauth code = %q, want auth-code", code)
+		}
+		return &oauth2.Token{
+			AccessToken:  "test-access-token",
+			RefreshToken: "test-refresh-token",
+			Expiry:       time.Now().UTC().Add(1 * time.Hour),
+		}, nil
+	}
 
 	connectResp := performRequest(t, mux, http.MethodGet, "/oauth/youtube/connect", "", "")
 	if connectResp.StatusCode != http.StatusFound {
@@ -169,12 +257,17 @@ func TestOAuthStubConnectFlow(t *testing.T) {
 	}
 
 	location := connectResp.Header.Get("Location")
-	if !strings.Contains(location, "/oauth/youtube/callback") {
-		t.Fatalf("connect redirect location = %q, want callback URL", location)
+	if !strings.Contains(location, "accounts.google.com") {
+		t.Fatalf("connect redirect location = %q, want google oauth URL", location)
+	}
+	stateCookie := findCookie(connectResp, oauthStateCookieName(providerYouTube))
+	if stateCookie == nil {
+		t.Fatalf("missing oauth state cookie")
 	}
 
-	callbackReq := httptest.NewRequest(http.MethodGet, location, nil)
+	callbackReq := httptest.NewRequest(http.MethodGet, "/oauth/youtube/callback?code=auth-code&state="+stateCookie.Value, nil)
 	callbackReq.Host = "localhost"
+	callbackReq.AddCookie(stateCookie)
 	callbackResp := httptest.NewRecorder()
 	mux.ServeHTTP(callbackResp, callbackReq)
 
@@ -191,7 +284,7 @@ func TestOAuthStubConnectFlow(t *testing.T) {
 	}
 }
 
-func newTestHandler(t *testing.T) (*sql.DB, *Handler, *http.ServeMux) {
+func newTestHandler(t *testing.T, syncServices ...syncCommitter) (*sql.DB, *Handler, *http.ServeMux) {
 	t.Helper()
 
 	dbPath := filepath.Join(t.TempDir(), "yt2sp-web.db")
@@ -205,7 +298,15 @@ func newTestHandler(t *testing.T) (*sql.DB, *Handler, *http.ServeMux) {
 		}
 	})
 
-	h, err := NewHandler(db, sqlite.NewMappingRepository(db))
+	h, err := NewHandler(
+		db,
+		sqlite.NewMappingRepository(db),
+		"test-yt-client-id",
+		"test-yt-secret",
+		"test-sp-client-id",
+		"test-sp-secret",
+		syncServices...,
+	)
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}
@@ -256,4 +357,27 @@ func readBody(t *testing.T, resp *http.Response) string {
 	}
 
 	return string(b)
+}
+
+func findCookie(resp *http.Response, name string) *http.Cookie {
+	for _, c := range resp.Cookies() {
+		if c.Name == name {
+			return c
+		}
+	}
+
+	return nil
+}
+
+type syncCommitterStub struct {
+	commitFn func(ctx context.Context, syncRunID int) error
+	calls    []int
+}
+
+func (s *syncCommitterStub) Commit(ctx context.Context, syncRunID int) error {
+	s.calls = append(s.calls, syncRunID)
+	if s.commitFn != nil {
+		return s.commitFn(ctx, syncRunID)
+	}
+	return nil
 }

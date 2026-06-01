@@ -1,6 +1,9 @@
 package config
 
-import "os"
+import (
+	"os"
+	"strings"
+)
 
 type Config struct {
 	Addr       string
@@ -15,10 +18,10 @@ func Load() *Config {
 	return &Config{
 		Addr:       getEnv("ADDR", ":8080"),
 		DBPath:     getEnv("DB_PATH", "yt2sp.db"),
-		YTClientID: os.Getenv("YT_CLIENT_ID"),
-		YTSecret:   os.Getenv("YT_SECRET"),
-		SPClientID: os.Getenv("SP_CLIENT_ID"),
-		SPSecret:   os.Getenv("SP_SECRET"),
+		YTClientID: strings.TrimSpace(os.Getenv("YT_CLIENT_ID")),
+		YTSecret:   strings.TrimSpace(os.Getenv("YT_SECRET")),
+		SPClientID: strings.TrimSpace(os.Getenv("SP_CLIENT_ID")),
+		SPSecret:   strings.TrimSpace(os.Getenv("SP_SECRET")),
 	}
 }
 
