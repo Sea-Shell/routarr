@@ -17,6 +17,7 @@ import (
 
 	"github.com/bateau84/yt2sp/internal/adapters/spotify"
 	"github.com/bateau84/yt2sp/internal/adapters/sqlite"
+	"github.com/bateau84/yt2sp/internal/adapters/youtube"
 	"github.com/bateau84/yt2sp/internal/app"
 	"github.com/bateau84/yt2sp/internal/domain"
 	"github.com/bateau84/yt2sp/internal/matcher"
@@ -38,6 +39,7 @@ type Handler struct {
 	db                  *sql.DB
 	mappingRepo         ports.MappingRepository
 	syncService         syncCommitter
+	drySyncService      dryRunner
 	templates           map[string]*template.Template
 	oauthConfigs        map[string]*oauth2.Config
 	oauthTokenExchanger func(ctx context.Context, conf *oauth2.Config, code string) (*oauth2.Token, error)
@@ -45,6 +47,10 @@ type Handler struct {
 
 type syncCommitter interface {
 	Commit(ctx context.Context, syncRunID int) error
+}
+
+type dryRunner interface {
+	RunDry(ctx context.Context, mappingID int) (*domain.SyncRun, []domain.TrackMatch, error)
 }
 
 type indexViewData struct {
@@ -175,6 +181,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /", h.index)
 	mux.HandleFunc("GET /mappings/new", h.createMappingForm)
 	mux.HandleFunc("POST /mappings", h.createMapping)
+	mux.HandleFunc("POST /mappings/{id}/sync", h.runDrySync)
 	mux.HandleFunc("POST /mappings/{id}/delete", h.deleteMapping)
 	mux.HandleFunc("GET /runs/{id}", h.syncDetail)
 	mux.HandleFunc("POST /runs/{id}/confirm", h.confirmRun)
@@ -386,6 +393,60 @@ func (h *Handler) getSyncService(ctx context.Context) (syncCommitter, error) {
 	h.syncService = app.NewSyncService(nil, spotifyService, h.mappingRepo, matchRepo, matcher.NewMatcher())
 
 	return h.syncService, nil
+}
+
+func (h *Handler) buildDryRunner(ctx context.Context) (dryRunner, error) {
+	if h.drySyncService != nil {
+		return h.drySyncService, nil
+	}
+
+	ytToken, err := h.getProviderToken(ctx, providerYouTube)
+	if err != nil {
+		return nil, fmt.Errorf("get youtube token: %w", err)
+	}
+	spToken, err := h.getProviderToken(ctx, providerSpotify)
+	if err != nil {
+		return nil, fmt.Errorf("get spotify token: %w", err)
+	}
+
+	ytService := youtube.NewAdapter(http.DefaultClient, ytToken)
+	spService := spotify.NewAdapter(http.DefaultClient, spToken)
+	matchRepo := sqlite.NewMatchRepository(h.db)
+	return app.NewSyncService(ytService, spService, h.mappingRepo, matchRepo, matcher.NewMatcher()), nil
+}
+
+func (h *Handler) runDrySync(w http.ResponseWriter, r *http.Request) {
+	mappingID, ok := parsePathInt(r.PathValue("id"))
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	runner, err := h.buildDryRunner(r.Context())
+	if err != nil {
+		http.Error(w, fmt.Sprintf("build sync service: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	run, matches, err := runner.RunDry(r.Context(), mappingID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("dry sync: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Persist a sync_item row for every match returned by RunDry.
+	// action='pending_review' is displayed as "pending" in the telemetry UI.
+	for _, m := range matches {
+		if _, err := h.db.ExecContext(r.Context(), `
+INSERT INTO sync_items(sync_run_id, youtube_video_id, action)
+VALUES (?, ?, 'pending_review')
+`, run.ID, m.YTVideoID); err != nil {
+			http.Error(w, fmt.Sprintf("save sync item: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	http.Redirect(w, r, fmt.Sprintf("/runs/%d", run.ID), http.StatusSeeOther)
 }
 
 func (h *Handler) getProviderToken(ctx context.Context, provider string) (string, error) {

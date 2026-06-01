@@ -154,6 +154,31 @@ ORDER BY id ASC
 	return mappings, nil
 }
 
+func (r *MappingRepository) SaveSyncRun(ctx context.Context, run *domain.SyncRun) error {
+	if r == nil || r.db == nil {
+		return fmt.Errorf("mapping repository is not initialized")
+	}
+	if run == nil {
+		return fmt.Errorf("sync run is nil")
+	}
+
+	res, err := r.db.ExecContext(ctx, `
+INSERT INTO sync_runs(mapping_id, started_at, status)
+VALUES (?, ?, ?)
+`, run.MappingID, run.StartedAt, run.Status)
+	if err != nil {
+		return fmt.Errorf("insert sync run: %w", err)
+	}
+
+	id, err := res.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("read inserted sync run id: %w", err)
+	}
+	run.ID = int(id)
+
+	return nil
+}
+
 func (r *MappingRepository) GetSyncRunByID(ctx context.Context, runID int) (*domain.SyncRun, error) {
 	if r == nil || r.db == nil {
 		return nil, fmt.Errorf("mapping repository is not initialized")
