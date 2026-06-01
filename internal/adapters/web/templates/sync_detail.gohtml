@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>yt2sp - Sync Run {{.Run.ID}}</title>
+    <style>
+        body { font-family: sans-serif; margin: 2rem; max-width: 1080px; }
+        table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+        th, td { border: 1px solid #ddd; padding: 0.5rem; text-align: left; vertical-align: top; }
+        .flash { background: #e8f0fe; padding: 0.75rem; border-radius: 6px; }
+        .meta dt { font-weight: 700; }
+        .meta dd { margin: 0 0 0.6rem 0; }
+        .actions { margin: 1rem 0; }
+    </style>
+</head>
+<body>
+    <h1>Sync Run #{{.Run.ID}}</h1>
+    <p><a href="/">Back to dashboard</a></p>
+
+    {{if .Flash}}<p class="flash">{{.Flash}}</p>{{end}}
+
+    <dl class="meta">
+        <dt>Status</dt><dd>{{.Run.Status}}</dd>
+        <dt>Mapping</dt><dd>{{.Run.MappingYouTubeTitle}} → {{.Run.MappingSpotifyTitle}}</dd>
+        <dt>Started</dt><dd>{{.Run.StartedAt}}</dd>
+        <dt>Finished</dt><dd>{{if .Run.FinishedAt}}{{.Run.FinishedAt}}{{else}}-{{end}}</dd>
+        <dt>Pending review</dt><dd>{{.PendingCount}}</dd>
+    </dl>
+
+    <div class="actions">
+        <form method="post" action="/runs/{{.Run.ID}}/confirm" style="display:inline">
+            <button type="submit">Confirmed</button>
+        </form>
+        <a href="/runs/{{.Run.ID}}/review">Review uncertain matches</a>
+    </div>
+
+    <h2>Run Items</h2>
+    {{if .Items}}
+    <table>
+        <thead>
+            <tr>
+                <th>YouTube</th>
+                <th>Spotify Candidate</th>
+                <th>Confidence</th>
+                <th>Decision</th>
+                <th>Action</th>
+                <th>Error</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .Items}}
+            <tr>
+                <td>{{.YouTubeTitle}}<br /><small>{{.YouTubeVideoID}}</small></td>
+                <td>{{.SpotifyTitle}} {{if .SpotifyArtist}}— {{.SpotifyArtist}}{{end}}<br /><small>{{.SpotifyTrackID}}</small></td>
+                <td>{{printf "%.2f" .Confidence}}</td>
+                <td>{{.Decision}}</td>
+                <td>{{.Action}}</td>
+                <td>{{.Error}}</td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    {{else}}
+    <p>No items recorded for this run yet.</p>
+    {{end}}
+</body>
+</html>

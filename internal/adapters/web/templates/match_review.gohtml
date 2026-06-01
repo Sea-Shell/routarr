@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>yt2sp - Match Review (Run {{.RunID}})</title>
+    <style>
+        body { font-family: sans-serif; margin: 2rem; max-width: 1080px; }
+        table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+        th, td { border: 1px solid #ddd; padding: 0.5rem; text-align: left; vertical-align: top; }
+        .flash { background: #e8f0fe; padding: 0.75rem; border-radius: 6px; }
+        .error { color: #b3261e; font-weight: 600; }
+        form { display: inline; margin-right: 0.5rem; }
+    </style>
+</head>
+<body>
+    <h1>Uncertain Match Review - Run #{{.RunID}}</h1>
+    <p>
+        <a href="/runs/{{.RunID}}">Back to run details</a>
+        |
+        <a href="/">Dashboard</a>
+    </p>
+
+    {{if .Flash}}<p class="flash">{{.Flash}}</p>{{end}}
+    {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+
+    {{if .Items}}
+    <table>
+        <thead>
+            <tr>
+                <th>YouTube</th>
+                <th>Spotify Candidate</th>
+                <th>Confidence</th>
+                <th>Decision</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .Items}}
+            <tr>
+                <td>{{.YouTubeTitle}}<br /><small>{{.YouTubeVideoID}}</small></td>
+                <td>{{.SpotifyTitle}} {{if .SpotifyArtist}}— {{.SpotifyArtist}}{{end}}<br /><small>{{.SpotifyTrackID}}</small></td>
+                <td>{{printf "%.2f" .Confidence}}</td>
+                <td>
+                    <form method="post" action="/runs/{{$.RunID}}/review/approve">
+                        <input type="hidden" name="youtube_video_id" value="{{.YouTubeVideoID}}" />
+                        <button type="submit">Approve</button>
+                    </form>
+                    <form method="post" action="/runs/{{$.RunID}}/review/reject">
+                        <input type="hidden" name="youtube_video_id" value="{{.YouTubeVideoID}}" />
+                        <button type="submit">Reject</button>
+                    </form>
+                </td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    {{else}}
+    <p>There are no uncertain matches for this run.</p>
+    {{end}}
+</body>
+</html>
