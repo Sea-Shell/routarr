@@ -27,3 +27,9 @@ type CandidateRepository interface {
 	GetCandidatesByRun(ctx context.Context, syncRunID int) (map[string][]domain.TrackMatchCandidate, error)
 }
 
+// SyncRunEventRepository persists structured log events for a sync run.
+type SyncRunEventRepository interface {
+	SaveSyncRunEvent(ctx context.Context, event *domain.SyncRunEvent) error
+	ListSyncRunEvents(ctx context.Context, runID int) ([]domain.SyncRunEvent, error)
+}
+

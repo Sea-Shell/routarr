@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/bateau84/yt2sp/internal/domain"
 )
@@ -247,4 +248,157 @@ func TestSyncRunEventsTableExists(t *testing.T) {
 		Message:   "test",
 		Details:   "optional",
 	}
+}
+
+func TestSyncRunEventRepository(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "yt2sp.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if closeErr := db.Close(); closeErr != nil {
+			t.Fatalf("close db: %v", closeErr)
+		}
+	})
+
+	// Set up prerequisite: mapping and sync run.
+	mappingRepo := NewMappingRepository(db)
+	mapping := &domain.PlaylistMapping{
+		YTPlaylistID:    "yt-event-test",
+		YTPlaylistTitle: "Event Test Playlist",
+		SPPlaylistID:    "sp-event-test",
+		SPPlaylistTitle: "Event Test Spotify",
+	}
+	if err := mappingRepo.Save(ctx, mapping); err != nil {
+		t.Fatalf("Save mapping: %v", err)
+	}
+
+	run := &domain.SyncRun{
+		MappingID: mapping.ID,
+		StartedAt: time.Now().UTC(),
+		Status:    "running",
+	}
+	if err := mappingRepo.SaveSyncRun(ctx, run); err != nil {
+		t.Fatalf("SaveSyncRun: %v", err)
+	}
+
+	eventRepo := NewSyncRunEventRepository(db)
+
+	t.Run("empty run returns empty slice", func(t *testing.T) {
+		events, err := eventRepo.ListSyncRunEvents(ctx, run.ID)
+		if err != nil {
+			t.Fatalf("ListSyncRunEvents(empty) error = %v", err)
+		}
+		if events == nil {
+			t.Fatalf("ListSyncRunEvents(empty) = nil, want empty slice")
+		}
+		if len(events) != 0 {
+			t.Fatalf("ListSyncRunEvents(empty) len = %d, want 0", len(events))
+		}
+	})
+
+	// Save two events with explicit timestamps (second has earlier time to verify ordering).
+	t1 := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
+	t2 := time.Date(2024, 1, 1, 10, 0, 1, 0, time.UTC)
+
+	ev1 := &domain.SyncRunEvent{
+		RunID:     run.ID,
+		CreatedAt: t1,
+		Level:     "info",
+		Message:   "sync started",
+		Details:   `{"count":3}`,
+	}
+	ev2 := &domain.SyncRunEvent{
+		RunID:     run.ID,
+		CreatedAt: t2,
+		Level:     "success",
+		Message:   "track matched",
+		Details:   `{"track":"Song A"}`,
+	}
+
+	if err := eventRepo.SaveSyncRunEvent(ctx, ev1); err != nil {
+		t.Fatalf("SaveSyncRunEvent(ev1) error = %v", err)
+	}
+	if ev1.ID == 0 {
+		t.Fatalf("SaveSyncRunEvent(ev1) did not set ID")
+	}
+
+	if err := eventRepo.SaveSyncRunEvent(ctx, ev2); err != nil {
+		t.Fatalf("SaveSyncRunEvent(ev2) error = %v", err)
+	}
+	if ev2.ID == 0 {
+		t.Fatalf("SaveSyncRunEvent(ev2) did not set ID")
+	}
+	if ev2.ID == ev1.ID {
+		t.Fatalf("SaveSyncRunEvent IDs not unique: both = %d", ev1.ID)
+	}
+
+	events, err := eventRepo.ListSyncRunEvents(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("ListSyncRunEvents error = %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("ListSyncRunEvents len = %d, want 2", len(events))
+	}
+
+	// Chronological order: ev1 before ev2.
+	if events[0].ID != ev1.ID {
+		t.Fatalf("events[0].ID = %d, want %d (ev1)", events[0].ID, ev1.ID)
+	}
+	if events[1].ID != ev2.ID {
+		t.Fatalf("events[1].ID = %d, want %d (ev2)", events[1].ID, ev2.ID)
+	}
+
+	// Field round-trip.
+	if events[0].RunID != run.ID {
+		t.Fatalf("events[0].RunID = %d, want %d", events[0].RunID, run.ID)
+	}
+	if events[0].Level != "info" {
+		t.Fatalf("events[0].Level = %q, want %q", events[0].Level, "info")
+	}
+	if events[0].Message != "sync started" {
+		t.Fatalf("events[0].Message = %q, want %q", events[0].Message, "sync started")
+	}
+	if events[0].Details != `{"count":3}` {
+		t.Fatalf("events[0].Details = %q, want %q", events[0].Details, `{"count":3}`)
+	}
+	if !events[0].CreatedAt.Equal(t1) {
+		t.Fatalf("events[0].CreatedAt = %v, want %v", events[0].CreatedAt, t1)
+	}
+
+	if events[1].Level != "success" {
+		t.Fatalf("events[1].Level = %q, want %q", events[1].Level, "success")
+	}
+	if events[1].Details != `{"track":"Song A"}` {
+		t.Fatalf("events[1].Details = %q, want %q", events[1].Details, `{"track":"Song A"}`)
+	}
+
+	t.Run("zero CreatedAt is set to now", func(t *testing.T) {
+		evZero := &domain.SyncRunEvent{
+			RunID:   run.ID,
+			Level:   "error",
+			Message: "something failed",
+			// CreatedAt intentionally zero
+		}
+		before := time.Now().UTC()
+		if err := eventRepo.SaveSyncRunEvent(ctx, evZero); err != nil {
+			t.Fatalf("SaveSyncRunEvent(zero ts) error = %v", err)
+		}
+		after := time.Now().UTC()
+		if evZero.ID == 0 {
+			t.Fatalf("SaveSyncRunEvent(zero ts) did not set ID")
+		}
+		if evZero.CreatedAt.IsZero() {
+			t.Fatalf("SaveSyncRunEvent(zero ts) did not set CreatedAt")
+		}
+		if evZero.CreatedAt.Before(before) || evZero.CreatedAt.After(after) {
+			t.Fatalf("SaveSyncRunEvent(zero ts) CreatedAt = %v, want between %v and %v",
+				evZero.CreatedAt, before, after)
+		}
+	})
 }
