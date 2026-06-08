@@ -1,0 +1,131 @@
+{{define "title"}}Sync Progress — yt2sp{{end}}
+
+{{define "content"}}
+<div class="card">
+    <h2 style="margin-top:0">Sync Progress</h2>
+    <p style="color:var(--muted); font-size:0.85rem;">
+        Run #{{.Run.ID}} &mdash; <span id="run-status">{{.Run.Status}}</span>
+    </p>
+
+    <div id="sync-log" style="
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 1rem 1.25rem;
+        font-family: monospace;
+        font-size: 0.82rem;
+        line-height: 1.6;
+        min-height: 8rem;
+        max-height: 30rem;
+        overflow-y: auto;
+        color: var(--text);
+        margin-bottom: 1.25rem;
+    ">
+        <span style="color:var(--muted)">Loading events&hellip;</span>
+    </div>
+
+    {{if eq .Run.Status "completed"}}
+    <div id="actions-done" class="actions">
+        <a class="btn btn-primary" href="/runs/{{.Run.ID}}">View Results</a>
+        {{if gt .PendingCount 0}}
+        <a class="btn btn-ghost" href="/runs/{{.Run.ID}}/review">Review Matches</a>
+        {{end}}
+        <a class="btn btn-ghost" href="/">Back to Routes</a>
+    </div>
+    {{else if eq .Run.Status "failed"}}
+    <div id="actions-done" class="actions">
+        <span class="badge" style="background:rgba(255,107,74,0.12);color:var(--red);border:1px solid rgba(255,107,74,0.3);">Failed</span>
+        <a class="btn btn-ghost" href="/">Back to Routes</a>
+    </div>
+    {{else}}
+    <div id="actions-done" class="actions" style="display:none"></div>
+    {{end}}
+</div>
+
+<script>
+(function() {
+    var eventsURL = "/runs/{{.Run.ID}}/events";
+    var logEl     = document.getElementById("sync-log");
+    var actionsEl = document.getElementById("actions-done");
+    var seenIDs   = {};
+    var done      = false;
+    var failures  = 0;
+
+    function appendLine(text, color) {
+        var line = document.createElement("div");
+        line.style.color = color || "";
+        line.textContent = text;
+        // Remove placeholder on first real line.
+        if (logEl.firstChild && logEl.firstChild.tagName !== "DIV") {
+            logEl.innerHTML = "";
+        }
+        logEl.appendChild(line);
+        logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function levelColor(level) {
+        if (level === "error") return "var(--red)";
+        if (level === "warn")  return "var(--amber)";
+        return "var(--green)";
+    }
+
+    function renderActions(data) {
+        var status = data.run.status;
+        document.getElementById("run-status").textContent = status;
+        if (status !== "completed" && status !== "failed") return;
+
+        var html = "";
+        if (status === "completed") {
+            html += '<a class="btn btn-primary" href="' + data.urls.results + '">View Results</a> ';
+            if (data.pending_count > 0) {
+                html += '<a class="btn btn-ghost" href="' + data.urls.review + '">Review Matches</a> ';
+            }
+            html += '<a class="btn btn-ghost" href="' + data.urls.routes + '">Back to Routes</a>';
+        } else {
+            html += '<span class="badge" style="background:rgba(255,107,74,0.12);color:var(--red);border:1px solid rgba(255,107,74,0.3);">Failed</span> ';
+            html += '<a class="btn btn-ghost" href="' + data.urls.routes + '">Back to Routes</a>';
+        }
+        actionsEl.innerHTML = html;
+        actionsEl.style.display = "flex";
+        done = true;
+    }
+
+    function poll() {
+        fetch(eventsURL)
+            .then(function(r) {
+                if (!r.ok) throw new Error("HTTP " + r.status);
+                return r.json();
+            })
+            .then(function(data) {
+                failures = 0;
+                data.events.forEach(function(ev) {
+                    if (!seenIDs[ev.id]) {
+                        seenIDs[ev.id] = true;
+                        var ts  = ev.created_at ? ev.created_at.replace("T", " ").replace("Z", "") : "";
+                        var msg = (ts ? "[" + ts + "] " : "") + "[" + ev.level + "] " + ev.message;
+                        if (ev.details) msg += " — " + ev.details;
+                        appendLine(msg, levelColor(ev.level));
+                    }
+                });
+                renderActions(data);
+                if (!done) setTimeout(poll, 1000);
+            })
+            .catch(function(err) {
+                failures++;
+                if (failures >= 5) {
+                    appendLine("⚠ Lost connection to server (" + err.message + ")", "var(--red)");
+                    actionsEl.innerHTML = '<a class="btn btn-ghost" href="/">Back to Routes</a>';
+                    actionsEl.style.display = "flex";
+                } else {
+                    setTimeout(poll, 2000);
+                }
+            });
+    }
+
+    // Start polling only if run is still in progress (not already terminal on page load).
+    if (!done) {
+        poll();
+    }
+})();
+</script>
+{{end}}
