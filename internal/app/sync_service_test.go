@@ -363,6 +363,20 @@ func (s *matchRepoStub) GetMatch(ctx context.Context, ytVideoID string) (*domain
 	return nil, nil
 }
 
+func (s *matchRepoStub) UpdateMatchChoice(ctx context.Context, ytVideoID, spTrackID, spTitle, spArtist string, decision domain.MatchDecision) error {
+	if s.existing == nil {
+		s.existing = make(map[string]*domain.TrackMatch)
+	}
+	if m, ok := s.existing[ytVideoID]; ok {
+		m.SPTrackID = spTrackID
+		m.SPTitle = spTitle
+		m.SPArtist = spArtist
+		m.Decision = decision
+		m.DecisionSource = "user"
+	}
+	return nil
+}
+
 type youtubeServiceStub struct {
 	videos []domain.TrackMatch
 	err    error
@@ -376,11 +390,11 @@ func (s *youtubeServiceStub) GetPlaylistVideos(ctx context.Context, playlistID s
 }
 
 type spotifyServiceStub struct {
-	candidate   *domain.TrackMatch
-	err         error
-	searchCalls int
-	onSearch    func()
-	onAdd       func(playlistID, trackID string)
+	candidate              *domain.TrackMatch
+	err                    error
+	searchCalls            int
+	onSearch               func()
+	onAdd                  func(playlistID, trackID string)
 	playlistTracks         []string
 	getPlaylistTracksCalls int
 	addedTracks            []addedTrackCall
@@ -392,7 +406,21 @@ type addedTrackCall struct {
 	trackID    string
 }
 
+// SearchTrack is kept for interface compliance; sync service now uses SearchTracks.
 func (s *spotifyServiceStub) SearchTrack(ctx context.Context, query string) (*domain.TrackMatch, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	if s.candidate == nil {
+		return nil, nil
+	}
+	copyCandidate := *s.candidate
+	return &copyCandidate, nil
+}
+
+// SearchTracks satisfies the updated SpotifyService interface.
+// It converts the single stub candidate into a []TrackMatchCandidate slice.
+func (s *spotifyServiceStub) SearchTracks(ctx context.Context, query string, limit int) ([]domain.TrackMatchCandidate, error) {
 	s.searchCalls++
 	if s.onSearch != nil {
 		s.onSearch()
@@ -403,8 +431,14 @@ func (s *spotifyServiceStub) SearchTrack(ctx context.Context, query string) (*do
 	if s.candidate == nil {
 		return nil, nil
 	}
-	copyCandidate := *s.candidate
-	return &copyCandidate, nil
+	return []domain.TrackMatchCandidate{
+		{
+			SPTrackID: s.candidate.SPTrackID,
+			SPTitle:   s.candidate.SPTitle,
+			SPArtist:  s.candidate.SPArtist,
+			Rank:      1,
+		},
+	}, nil
 }
 
 func (s *spotifyServiceStub) AddTrackToPlaylist(ctx context.Context, playlistID, trackID string) error {
@@ -652,4 +686,193 @@ func TestCommitSkipsNonEligibleItemsAndCompletes(t *testing.T) {
 	if mappingRepo.statusUpdates[0].status != syncRunStatusCompleted {
 		t.Fatalf("run status = %q, want %q", mappingRepo.statusUpdates[0].status, syncRunStatusCompleted)
 	}
+}
+
+// TestRunDryReusesPriorManualChoiceAndSetsIsPriorChoice verifies that when a manual
+// decision already exists for a video, RunDry reuses it and marks IsPriorChoice=true.
+func TestRunDryReusesPriorManualChoiceAndSetsIsPriorChoice(t *testing.T) {
+	t.Parallel()
+
+	mapping := &domain.PlaylistMapping{ID: 40, YTPlaylistID: "yt-playlist"}
+	approved := &domain.TrackMatch{
+		YTVideoID:      "video-prior",
+		YTTitle:        "Artist - Track",
+		SPTrackID:      "sp-prior",
+		SPTitle:        "Track",
+		SPArtist:       "Artist",
+		Decision:       domain.MatchApproved,
+		DecisionSource: "user", // must be "user" for IsPriorChoice to be set
+	}
+
+	mappingRepo := &mappingRepoStub{mapping: mapping}
+	matchRepo := &matchRepoStub{existing: map[string]*domain.TrackMatch{"video-prior": approved}}
+	yt := &youtubeServiceStub{videos: []domain.TrackMatch{{YTVideoID: "video-prior", YTTitle: "Artist - Track"}}}
+	sp := &spotifyServiceStub{}
+
+	svc := NewSyncService(yt, sp, mappingRepo, matchRepo, &matcherStub{})
+
+	run, matches, err := svc.RunDry(context.Background(), mapping.ID)
+	if err != nil {
+		t.Fatalf("RunDry() error = %v", err)
+	}
+	if run == nil {
+		t.Fatalf("RunDry() run is nil")
+	}
+	if len(matches) != 1 {
+		t.Fatalf("RunDry() returned %d matches, want 1", len(matches))
+	}
+
+	got := matches[0]
+	if got.SPTrackID != "sp-prior" {
+		t.Fatalf("SPTrackID = %q, want %q", got.SPTrackID, "sp-prior")
+	}
+	if !got.IsPriorChoice {
+		t.Fatal("IsPriorChoice = false, want true")
+	}
+	// SearchTracks must not be called when reusing a prior choice.
+	if sp.searchCalls != 0 {
+		t.Fatalf("SearchTracks called %d times, want 0", sp.searchCalls)
+	}
+}
+
+// TestRunDrySavesTopCandidatesAndPicksBest verifies that with a candidateRepo wired,
+// RunDry stores all scored candidates and chooses the highest-confidence one.
+func TestRunDrySavesTopCandidatesAndPicksBest(t *testing.T) {
+	t.Parallel()
+
+	mapping := &domain.PlaylistMapping{ID: 41, YTPlaylistID: "yt-playlist"}
+	video := domain.TrackMatch{YTVideoID: "video-new", YTTitle: "Nirvana - Come As You Are"}
+
+	mappingRepo := &mappingRepoStub{mapping: mapping}
+	matchRepo := &matchRepoStub{existing: map[string]*domain.TrackMatch{}}
+	yt := &youtubeServiceStub{videos: []domain.TrackMatch{video}}
+	candRepo := &candidateRepoStub{}
+
+	sp := &spotifyServiceStubMulti{
+		candidates: []domain.TrackMatchCandidate{
+			{SPTrackID: "sp-best", SPTitle: "Come As You Are", SPArtist: "Nirvana", Rank: 1},
+			{SPTrackID: "sp-mid", SPTitle: "Heart-Shaped Box", SPArtist: "Nirvana", Rank: 2},
+			{SPTrackID: "sp-low", SPTitle: "Something Else", SPArtist: "Other", Rank: 3},
+		},
+	}
+
+	// scorer always returns 0.9 for rank-1 title, lower for others
+	matcher := &rankAwareMatcherStub{
+		scores: map[string]float64{
+			"Come As You Are": 0.92,
+			"Heart-Shaped Box": 0.40,
+			"Something Else":  0.15,
+		},
+		defaultDecision: domain.MatchAuto,
+	}
+
+	svc := NewSyncService(yt, sp, mappingRepo, matchRepo, matcher, WithCandidateRepository(candRepo))
+
+	_, matches, err := svc.RunDry(context.Background(), mapping.ID)
+	if err != nil {
+		t.Fatalf("RunDry() error = %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("RunDry() returned %d matches, want 1", len(matches))
+	}
+
+	got := matches[0]
+	if got.SPTrackID != "sp-best" {
+		t.Fatalf("best candidate SPTrackID = %q, want %q", got.SPTrackID, "sp-best")
+	}
+	if got.Confidence != 0.92 {
+		t.Fatalf("best candidate confidence = %v, want 0.92", got.Confidence)
+	}
+	if got.IsPriorChoice {
+		t.Fatal("IsPriorChoice = true, want false for fresh search")
+	}
+
+	// CandidateRepo must have received 3 candidates.
+	if len(candRepo.saved) != 3 {
+		t.Fatalf("saved candidates = %d, want 3", len(candRepo.saved))
+	}
+}
+
+// ── Additional stubs for new tests ──────────────────────────────────────────
+
+type candidateRepoStub struct {
+	saved  []domain.TrackMatchCandidate
+	saveErr error
+}
+
+func (s *candidateRepoStub) SaveCandidates(_ context.Context, candidates []domain.TrackMatchCandidate) error {
+	if s.saveErr != nil {
+		return s.saveErr
+	}
+	s.saved = append(s.saved, candidates...)
+	return nil
+}
+
+func (s *candidateRepoStub) GetCandidates(_ context.Context, syncRunID int, ytVideoID string) ([]domain.TrackMatchCandidate, error) {
+	var out []domain.TrackMatchCandidate
+	for _, c := range s.saved {
+		if c.SyncRunID == syncRunID && c.YTVideoID == ytVideoID {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+func (s *candidateRepoStub) GetCandidatesByRun(_ context.Context, syncRunID int) (map[string][]domain.TrackMatchCandidate, error) {
+	result := make(map[string][]domain.TrackMatchCandidate)
+	for _, c := range s.saved {
+		if c.SyncRunID == syncRunID {
+			result[c.YTVideoID] = append(result[c.YTVideoID], c)
+		}
+	}
+	return result, nil
+}
+
+// spotifyServiceStubMulti returns a configurable slice of candidates.
+type spotifyServiceStubMulti struct {
+	candidates []domain.TrackMatchCandidate
+	err        error
+}
+
+func (s *spotifyServiceStubMulti) SearchTrack(_ context.Context, _ string) (*domain.TrackMatch, error) {
+	return nil, nil
+}
+
+func (s *spotifyServiceStubMulti) SearchTracks(_ context.Context, _ string, _ int) ([]domain.TrackMatchCandidate, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	out := make([]domain.TrackMatchCandidate, len(s.candidates))
+	copy(out, s.candidates)
+	return out, nil
+}
+
+func (s *spotifyServiceStubMulti) GetPlaylistTracks(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
+}
+
+func (s *spotifyServiceStubMulti) AddTrackToPlaylist(_ context.Context, _, _ string) error {
+	return nil
+}
+
+// rankAwareMatcherStub scores by candidate title from a map.
+type rankAwareMatcherStub struct {
+	scores          map[string]float64
+	defaultDecision domain.MatchDecision
+}
+
+func (m *rankAwareMatcherStub) Normalize(title string) string { return title }
+
+func (m *rankAwareMatcherStub) Score(_, candidateTitle, _ string) float64 {
+	if s, ok := m.scores[candidateTitle]; ok {
+		return s
+	}
+	return 0
+}
+
+func (m *rankAwareMatcherStub) Classify(_ float64) domain.MatchDecision {
+	if m.defaultDecision != "" {
+		return m.defaultDecision
+	}
+	return domain.MatchPending
 }

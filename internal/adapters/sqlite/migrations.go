@@ -101,6 +101,23 @@ CREATE INDEX IF NOT EXISTS idx_sync_items_youtube_video_id ON sync_items(youtube
 		query: `
 CREATE INDEX IF NOT EXISTS idx_sync_runs_mapping_id ON sync_runs(mapping_id, id);`,
 	},
+	{
+		version: 8,
+		name:    "create_track_match_candidates",
+		query: `
+CREATE TABLE IF NOT EXISTS track_match_candidates (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	sync_run_id INTEGER NOT NULL,
+	youtube_video_id TEXT NOT NULL,
+	spotify_track_id TEXT NOT NULL,
+	spotify_title TEXT NOT NULL,
+	spotify_artist TEXT NOT NULL,
+	confidence REAL NOT NULL,
+	rank INTEGER NOT NULL,
+	FOREIGN KEY(sync_run_id) REFERENCES sync_runs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_tmc_run_video ON track_match_candidates(sync_run_id, youtube_video_id);`,
+	},
 }
 
 func Open(path string) (*sql.DB, error) {

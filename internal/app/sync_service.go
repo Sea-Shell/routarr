@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -14,11 +15,15 @@ import (
 const syncRunStatusPending = "pending"
 
 const (
-	syncRunStatusCompleted        = "completed"
-	syncItemActionAdded           = "added"
+	syncRunStatusCompleted         = "completed"
+	syncItemActionAdded            = "added"
 	syncItemActionSkippedDuplicate = "skipped_duplicate"
-	syncItemActionFailed          = "failed"
+	syncItemActionFailed           = "failed"
 )
+
+// maxCandidates is the number of Spotify search results to fetch and store
+// as alternatives per YouTube video during a dry run.
+const maxCandidates = 5
 
 var ErrSyncRunNotFound = errors.New("sync run not found")
 
@@ -37,12 +42,13 @@ type syncRunRepository interface {
 }
 
 type SyncService struct {
-	youtubeService ports.YouTubeService
-	spotifyService ports.SpotifyService
-	mappingRepo    ports.MappingRepository
-	matchRepo      ports.MatchRepository
-	matcher        Matcher
-	syncRunRepo    syncRunRepository
+	youtubeService  ports.YouTubeService
+	spotifyService  ports.SpotifyService
+	mappingRepo     ports.MappingRepository
+	matchRepo       ports.MatchRepository
+	candidateRepo   ports.CandidateRepository
+	matcher         Matcher
+	syncRunRepo     syncRunRepository
 }
 
 func NewSyncService(
@@ -51,19 +57,37 @@ func NewSyncService(
 	mappingRepo ports.MappingRepository,
 	matchRepo ports.MatchRepository,
 	matcher Matcher,
+	opts ...SyncServiceOption,
 ) *SyncService {
 	var syncRunRepo syncRunRepository
 	if repo, ok := any(mappingRepo).(syncRunRepository); ok {
 		syncRunRepo = repo
 	}
 
-	return &SyncService{
+	svc := &SyncService{
 		youtubeService: youtubeService,
 		spotifyService: spotifyService,
 		mappingRepo:    mappingRepo,
 		matchRepo:      matchRepo,
 		matcher:        matcher,
 		syncRunRepo:    syncRunRepo,
+	}
+
+	for _, opt := range opts {
+		opt(svc)
+	}
+
+	return svc
+}
+
+// SyncServiceOption allows optional configuration of SyncService.
+type SyncServiceOption func(*SyncService)
+
+// WithCandidateRepository attaches a CandidateRepository so dry runs persist
+// top-N Spotify alternatives for review.
+func WithCandidateRepository(repo ports.CandidateRepository) SyncServiceOption {
+	return func(s *SyncService) {
+		s.candidateRepo = repo
 	}
 }
 
@@ -103,7 +127,7 @@ func (s *SyncService) RunDry(ctx context.Context, mappingID int) (*domain.SyncRu
 			return nil, nil, err
 		}
 
-		match, err := s.resolveMatch(ctx, video)
+		match, err := s.resolveMatch(ctx, run.ID, video)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -129,7 +153,7 @@ func (s *SyncService) saveSyncRun(ctx context.Context, run *domain.SyncRun) erro
 	return nil
 }
 
-func (s *SyncService) resolveMatch(ctx context.Context, video domain.TrackMatch) (*domain.TrackMatch, error) {
+func (s *SyncService) resolveMatch(ctx context.Context, runID int, video domain.TrackMatch) (*domain.TrackMatch, error) {
 	existing, err := s.matchRepo.GetMatch(ctx, video.YTVideoID)
 	if err != nil {
 		return nil, fmt.Errorf("get previous match for %q: %w", video.YTVideoID, err)
@@ -138,6 +162,9 @@ func (s *SyncService) resolveMatch(ctx context.Context, video domain.TrackMatch)
 		if existing.Decision == domain.MatchRejected {
 			return nil, nil
 		}
+		// Mark as prior choice only for saved manual decisions (decision_source="user").
+		// Auto-approved matches from prior runs should not show the "Using previous choice" badge.
+		existing.IsPriorChoice = existing.DecisionSource == "user"
 		return existing, nil
 	}
 
@@ -146,26 +173,53 @@ func (s *SyncService) resolveMatch(ctx context.Context, video domain.TrackMatch)
 		query = video.YTTitle
 	}
 
-	candidate, err := s.spotifyService.SearchTrack(ctx, query)
+	// Fetch top-N candidates from Spotify for review.
+	rawCandidates, err := s.spotifyService.SearchTracks(ctx, query, maxCandidates)
 	if err != nil {
-		return nil, fmt.Errorf("search spotify track for video %q: %w", video.YTVideoID, err)
+		return nil, fmt.Errorf("search spotify tracks for video %q: %w", video.YTVideoID, err)
+	}
+
+	// Score all candidates and find the best.
+	bestIdx := -1
+	bestScore := -1.0
+
+	scoredCandidates := make([]domain.TrackMatchCandidate, 0, len(rawCandidates))
+	for i := range rawCandidates {
+		c := rawCandidates[i]
+		c.SyncRunID = runID
+		c.YTVideoID = video.YTVideoID
+		score := s.matcher.Score(video.YTTitle, c.SPTitle, c.SPArtist)
+		c.Confidence = score
+		scoredCandidates = append(scoredCandidates, c)
+		if score > bestScore {
+			bestScore = score
+			bestIdx = i
+		}
+	}
+
+	// Persist candidates for the review UI (best-effort; log on failure).
+	if s.candidateRepo != nil && len(scoredCandidates) > 0 {
+		if saveErr := s.candidateRepo.SaveCandidates(ctx, scoredCandidates); saveErr != nil {
+			slog.Warn("failed to save candidates for review", "video_id", video.YTVideoID, "error", saveErr)
+		}
 	}
 
 	resolved := domain.TrackMatch{
-		YTVideoID: video.YTVideoID,
-		YTTitle:   video.YTTitle,
-		Decision:  domain.MatchRejected,
+		YTVideoID:  video.YTVideoID,
+		YTTitle:    video.YTTitle,
+		Decision:   domain.MatchRejected,
+		Candidates: scoredCandidates,
 	}
 
-	if candidate != nil {
-		score := s.matcher.Score(video.YTTitle, candidate.SPTitle, candidate.SPArtist)
-		decision := s.matcher.Classify(score)
+	if bestIdx >= 0 {
+		best := scoredCandidates[bestIdx]
+		decision := s.matcher.Classify(bestScore)
 
-		resolved.SPTrackID = candidate.SPTrackID
-		resolved.SPTitle = candidate.SPTitle
-		resolved.SPArtist = candidate.SPArtist
-		resolved.Confidence = score
-		resolved.Decision = decision
+		resolved.SPTrackID  = best.SPTrackID
+		resolved.SPTitle     = best.SPTitle
+		resolved.SPArtist    = best.SPArtist
+		resolved.Confidence  = bestScore
+		resolved.Decision    = decision
 	}
 
 	if err := s.matchRepo.SaveMatch(ctx, &resolved); err != nil {
@@ -273,3 +327,4 @@ func (s *SyncService) Commit(ctx context.Context, syncRunID int) error {
 
 	return nil
 }
+

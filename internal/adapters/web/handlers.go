@@ -36,12 +36,13 @@ const (
 var templateFS embed.FS
 
 type Handler struct {
-	db                  *sql.DB
-	mappingRepo         ports.MappingRepository
-	syncService         syncCommitter
-	drySyncService      dryRunner
-	templates           map[string]*template.Template
-	oauthConfigs        map[string]*oauth2.Config
+	db            *sql.DB
+	mappingRepo   ports.MappingRepository
+	matchRepo     ports.MatchRepository
+	candidateRepo ports.CandidateRepository
+	syncService   syncCommitter
+	templates     map[string]*template.Template
+	oauthConfigs  map[string]*oauth2.Config
 	oauthTokenExchanger func(ctx context.Context, conf *oauth2.Config, code string) (*oauth2.Token, error)
 }
 
@@ -103,9 +104,25 @@ type syncDetailData struct {
 type reviewItemView struct {
 	YouTubeVideoID string
 	YouTubeTitle   string
+	YouTubeURL     string // https://www.youtube.com/watch?v=<YTVideoID>
 	SpotifyTrackID string
 	SpotifyTitle   string
 	SpotifyArtist  string
+	SpotifyURL     string // https://open.spotify.com/track/<SPTrackID>
+	Confidence     float64
+	IsPriorChoice  bool
+	IsAutoMatch    bool // true when decision="auto"; controls initial expand state of alternatives
+	// Candidates holds the top alternative matches from the current run.
+	Candidates []candidateView
+}
+
+// candidateView is one Spotify search result shown as an alternative.
+type candidateView struct {
+	Rank           int
+	SPTrackID      string
+	SPTitle        string
+	SPArtist       string
+	SpotifyURL     string
 	Confidence     float64
 }
 
@@ -145,10 +162,12 @@ func NewHandler(db *sql.DB, mappingRepo ports.MappingRepository, oauthBaseURL, y
 	}
 
 	return &Handler{
-		db:          db,
-		mappingRepo: mappingRepo,
-		syncService: syncService,
-		templates:   tmpls,
+		db:            db,
+		mappingRepo:   mappingRepo,
+		matchRepo:     sqlite.NewMatchRepository(db),
+		candidateRepo: sqlite.NewCandidateRepository(db),
+		syncService:   syncService,
+		templates:     tmpls,
 		oauthConfigs: map[string]*oauth2.Config{
 			providerYouTube: {
 				ClientID:     strings.TrimSpace(ytClientID),
@@ -187,6 +206,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /runs/{id}/confirm", h.confirmRun)
 	mux.HandleFunc("GET /runs/{id}/review", h.matchReview)
 	mux.HandleFunc("POST /runs/{id}/review/{decision}", h.updateMatchDecision)
+	// pick allows choosing an alternative candidate as "use once" (run-scoped) or "remember" (global).
+	mux.HandleFunc("POST /runs/{id}/review/pick", h.pickCandidate)
 	mux.HandleFunc("GET /oauth/{provider}/connect", h.oauthConnect)
 	mux.HandleFunc("GET /oauth/{provider}/callback", h.oauthCallback)
 }
@@ -383,36 +404,34 @@ func (h *Handler) getSyncService(ctx context.Context) (syncCommitter, error) {
 		return h.syncService, nil
 	}
 
-	token, err := h.getProviderToken(ctx, providerSpotify)
+	spToken, spClient, err := h.getProviderTokenFresh(ctx, providerSpotify)
 	if err != nil {
 		return nil, err
 	}
 
-	spotifyService := spotify.NewAdapter(http.DefaultClient, token)
+	spotifyService := spotify.NewAdapter(spClient, spToken)
 	matchRepo := sqlite.NewMatchRepository(h.db)
-	h.syncService = app.NewSyncService(nil, spotifyService, h.mappingRepo, matchRepo, matcher.NewMatcher())
-
-	return h.syncService, nil
+	return app.NewSyncService(nil, spotifyService, h.mappingRepo, matchRepo, matcher.NewMatcher()), nil
 }
 
 func (h *Handler) buildDryRunner(ctx context.Context) (dryRunner, error) {
-	if h.drySyncService != nil {
-		return h.drySyncService, nil
-	}
-
-	ytToken, err := h.getProviderToken(ctx, providerYouTube)
+	ytToken, ytClient, err := h.getProviderTokenFresh(ctx, providerYouTube)
 	if err != nil {
 		return nil, fmt.Errorf("get youtube token: %w", err)
 	}
-	spToken, err := h.getProviderToken(ctx, providerSpotify)
+	spToken, spClient, err := h.getProviderTokenFresh(ctx, providerSpotify)
 	if err != nil {
 		return nil, fmt.Errorf("get spotify token: %w", err)
 	}
 
-	ytService := youtube.NewAdapter(http.DefaultClient, ytToken)
-	spService := spotify.NewAdapter(http.DefaultClient, spToken)
+	ytService := youtube.NewAdapter(ytClient, ytToken)
+	spService := spotify.NewAdapter(spClient, spToken)
 	matchRepo := sqlite.NewMatchRepository(h.db)
-	return app.NewSyncService(ytService, spService, h.mappingRepo, matchRepo, matcher.NewMatcher()), nil
+	candidateRepo := sqlite.NewCandidateRepository(h.db)
+	return app.NewSyncService(
+		ytService, spService, h.mappingRepo, matchRepo, matcher.NewMatcher(),
+		app.WithCandidateRepository(candidateRepo),
+	), nil
 }
 
 func (h *Handler) runDrySync(w http.ResponseWriter, r *http.Request) {
@@ -449,26 +468,98 @@ VALUES (?, ?, 'pending_review')
 	http.Redirect(w, r, fmt.Sprintf("/runs/%d", run.ID), http.StatusSeeOther)
 }
 
-func (h *Handler) getProviderToken(ctx context.Context, provider string) (string, error) {
-	var accessToken sql.NullString
-	err := h.db.QueryRowContext(ctx, `
-SELECT access_token
+// getProviderTokenFresh loads the stored OAuth token for provider, refreshes it
+// if expired using the configured oauth2.Config, persists any newly issued
+// tokens back to the DB, and returns the current access token together with an
+// auto-refreshing *http.Client.
+func (h *Handler) getProviderTokenFresh(ctx context.Context, provider string) (accessToken string, client *http.Client, err error) {
+	conf, ok := h.oauthConfigForProvider(provider)
+	if !ok {
+		return "", nil, fmt.Errorf("no oauth config for provider %q", provider)
+	}
+
+	var (
+		rawAccess  sql.NullString
+		rawRefresh sql.NullString
+		rawExpiry  sql.NullTime
+	)
+	err = h.db.QueryRowContext(ctx, `
+SELECT access_token, refresh_token, expiry
 FROM oauth_tokens
 WHERE provider = ?
-`, provider).Scan(&accessToken)
+`, provider).Scan(&rawAccess, &rawRefresh, &rawExpiry)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("oauth token for provider %q not found", provider)
+		return "", nil, fmt.Errorf("oauth token for provider %q not found", provider)
 	}
 	if err != nil {
-		return "", fmt.Errorf("query oauth token for provider %q: %w", provider, err)
+		return "", nil, fmt.Errorf("query oauth token for provider %q: %w", provider, err)
 	}
 
-	token := strings.TrimSpace(accessToken.String)
-	if token == "" {
-		return "", fmt.Errorf("oauth token for provider %q is empty", provider)
+	stored := strings.TrimSpace(rawAccess.String)
+	if stored == "" {
+		return "", nil, fmt.Errorf("oauth token for provider %q is empty", provider)
 	}
 
-	return token, nil
+	tok := &oauth2.Token{
+		AccessToken:  stored,
+		RefreshToken: strings.TrimSpace(rawRefresh.String),
+		Expiry:       rawExpiry.Time, // zero value when !rawExpiry.Valid; oauth2 treats zero as "no expiry"
+	}
+
+	// Wrap the token source so any token refresh is immediately saved to DB.
+	ts := &persistingTokenSource{
+		base:     conf.TokenSource(ctx, tok),
+		db:       h.db,
+		ctx:      ctx,
+		provider: provider,
+	}
+
+	// Token() refreshes if expired; uses stored token if still valid.
+	fresh, err := ts.Token()
+	if err != nil {
+		return "", nil, fmt.Errorf("refresh oauth token for provider %q: %w", provider, err)
+	}
+
+	return fresh.AccessToken, oauth2.NewClient(ctx, ts), nil
+}
+
+// persistingTokenSource wraps an oauth2.TokenSource and saves any newly issued
+// token (i.e. a refreshed token) back to the oauth_tokens DB table so the
+// refreshed credentials survive across restarts.
+type persistingTokenSource struct {
+	base     oauth2.TokenSource
+	db       *sql.DB
+	ctx      context.Context //nolint:containedctx // stored for DB writes that happen outside request scope
+	provider string
+	last     *oauth2.Token
+}
+
+func (p *persistingTokenSource) Token() (*oauth2.Token, error) {
+	tok, err := p.base.Token()
+	if err != nil {
+		return nil, err
+	}
+
+	// Persist only when a new token has been issued (access token changed).
+	if p.last == nil || p.last.AccessToken != tok.AccessToken {
+		var expiry any
+		if !tok.Expiry.IsZero() {
+			expiry = tok.Expiry.UTC()
+		}
+		_, dbErr := p.db.ExecContext(p.ctx, `
+UPDATE oauth_tokens
+SET access_token = ?, refresh_token = ?, expiry = ?, updated_at = ?
+WHERE provider = ?
+`, tok.AccessToken, nullableString(tok.RefreshToken), expiry, time.Now().UTC(), p.provider)
+		if dbErr != nil {
+			// Log and continue — the in-memory token is still usable for this request.
+			// The next request will re-fetch and retry the refresh if needed.
+			_ = dbErr
+		}
+		p.last = tok
+	}
+
+	return tok, nil
 }
 
 func (h *Handler) matchReview(w http.ResponseWriter, r *http.Request) {
@@ -550,6 +641,77 @@ WHERE youtube_video_id = ?
 		flash = "Match+rejected"
 	}
 	http.Redirect(w, r, fmt.Sprintf("/runs/%d/review?flash=%s", runID, flash), http.StatusSeeOther)
+}
+
+// pickCandidate handles POST /runs/{id}/review/pick.
+// It lets a reviewer select an alternative Spotify candidate instead of the
+// current best match. Mode is "once" (run-scoped only) or "remember" (persisted
+// globally so future dry runs skip re-searching).
+func (h *Handler) pickCandidate(w http.ResponseWriter, r *http.Request) {
+	runID, ok := parsePathInt(r.PathValue("id"))
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, fmt.Sprintf("parse pick form: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	ytVideoID := strings.TrimSpace(r.FormValue("youtube_video_id"))
+	spTrackID := strings.TrimSpace(r.FormValue("spotify_track_id"))
+	spTitle := strings.TrimSpace(r.FormValue("spotify_title"))
+	spArtist := strings.TrimSpace(r.FormValue("spotify_artist"))
+	mode := strings.ToLower(strings.TrimSpace(r.FormValue("mode"))) // "once" or "remember"
+
+	if ytVideoID == "" || spTrackID == "" {
+		http.Error(w, "youtube_video_id and spotify_track_id are required", http.StatusBadRequest)
+		return
+	}
+	if mode != "once" && mode != "remember" {
+		http.Error(w, "mode must be 'once' or 'remember'", http.StatusBadRequest)
+		return
+	}
+
+	if mode == "once" {
+		// Run-scoped override: only update sync_items for this run.
+		// The global track_matches record is left untouched so the match
+		// remains as-is for future dry runs.
+		// ListSyncRunMatches uses COALESCE(tm.spotify_track_id, si.selected_spotify_track_id)
+		// so commit will pick up this run-local selection.
+		_, err := h.db.ExecContext(r.Context(), `
+UPDATE sync_items
+SET selected_spotify_track_id = ?
+WHERE sync_run_id = ? AND youtube_video_id = ?
+`, spTrackID, runID, ytVideoID)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("update sync item track (once): %v", err), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		// "remember": persist the choice globally via the match repository so
+		// future dry runs recognise it as a prior manual decision (IsPriorChoice=true).
+		// First verify the video belongs to this run to prevent cross-run mutations.
+		var exists int
+		err := h.db.QueryRowContext(r.Context(), `
+SELECT COUNT(1) FROM sync_items WHERE sync_run_id = ? AND youtube_video_id = ?
+`, runID, ytVideoID).Scan(&exists)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("verify run ownership: %v", err), http.StatusInternalServerError)
+			return
+		}
+		if exists == 0 {
+			http.NotFound(w, r)
+			return
+		}
+		if err := h.matchRepo.UpdateMatchChoice(r.Context(), ytVideoID, spTrackID, spTitle, spArtist, domain.MatchApproved); err != nil {
+			http.Error(w, fmt.Sprintf("update picked candidate (remember): %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	http.Redirect(w, r, fmt.Sprintf("/runs/%d/review?flash=Candidate+picked", runID), http.StatusSeeOther)
 }
 
 func (h *Handler) oauthConnect(w http.ResponseWriter, r *http.Request) {
@@ -781,6 +943,10 @@ WHERE si.sync_run_id = ? AND tm.decision = ?
 }
 
 func (h *Handler) listPendingReviewItems(ctx context.Context, runID int) ([]reviewItemView, error) {
+	// Include:
+	//   - pending matches (need human decision)
+	//   - manual prior choices (decision_source='user') so the badge is reachable
+	//     and the reviewer can pick a different candidate or re-confirm.
 	rows, err := h.db.QueryContext(ctx, `
 SELECT
 	tm.youtube_video_id,
@@ -788,13 +954,18 @@ SELECT
 	COALESCE(tm.spotify_track_id, ''),
 	COALESCE(tm.spotify_track_title, ''),
 	COALESCE(tm.spotify_artist, ''),
-	tm.confidence
+	tm.confidence,
+	COALESCE(tm.decision_source, ''),
+	tm.decision
 FROM sync_items si
 JOIN track_matches tm ON tm.youtube_video_id = si.youtube_video_id
 WHERE si.sync_run_id = ?
-	AND tm.decision = ?
+	AND (
+		tm.decision = ?
+		OR (tm.decision = ? AND tm.decision_source = 'user')
+	)
 ORDER BY si.id ASC
-`, runID, string(domain.MatchPending))
+`, runID, string(domain.MatchPending), string(domain.MatchApproved))
 	if err != nil {
 		return nil, fmt.Errorf("query pending review items: %w", err)
 	}
@@ -803,6 +974,8 @@ ORDER BY si.id ASC
 	var items []reviewItemView
 	for rows.Next() {
 		var item reviewItemView
+		var decisionSource string
+		var decision string
 		if err := rows.Scan(
 			&item.YouTubeVideoID,
 			&item.YouTubeTitle,
@@ -810,9 +983,15 @@ ORDER BY si.id ASC
 			&item.SpotifyTitle,
 			&item.SpotifyArtist,
 			&item.Confidence,
+			&decisionSource,
+			&decision,
 		); err != nil {
 			return nil, fmt.Errorf("scan pending review item: %w", err)
 		}
+		item.YouTubeURL = youtubeVideoURL(item.YouTubeVideoID)
+		item.SpotifyURL = spotifyTrackURL(item.SpotifyTrackID)
+		item.IsPriorChoice = decisionSource == "user"
+		item.IsAutoMatch = domain.MatchDecision(decision) == domain.MatchAuto
 		items = append(items, item)
 	}
 
@@ -820,7 +999,43 @@ ORDER BY si.id ASC
 		return nil, fmt.Errorf("iterate pending review items: %w", err)
 	}
 
+	// Batch-load candidates for all items in a single query.
+	if len(items) > 0 {
+		allCandidates, err := h.candidateRepo.GetCandidatesByRun(ctx, runID)
+		if err != nil {
+			return nil, fmt.Errorf("load candidates for run %d: %w", runID, err)
+		}
+		for i := range items {
+			for _, c := range allCandidates[items[i].YouTubeVideoID] {
+				items[i].Candidates = append(items[i].Candidates, candidateView{
+					Rank:       c.Rank,
+					SPTrackID:  c.SPTrackID,
+					SPTitle:    c.SPTitle,
+					SPArtist:   c.SPArtist,
+					SpotifyURL: spotifyTrackURL(c.SPTrackID),
+					Confidence: c.Confidence,
+				})
+			}
+		}
+	}
+
 	return items, nil
+}
+
+// youtubeVideoURL returns the canonical watch URL for a YouTube video ID.
+func youtubeVideoURL(videoID string) string {
+	if videoID == "" {
+		return ""
+	}
+	return "https://www.youtube.com/watch?v=" + videoID
+}
+
+// spotifyTrackURL returns the canonical open URL for a Spotify track ID.
+func spotifyTrackURL(trackID string) string {
+	if trackID == "" {
+		return ""
+	}
+	return "https://open.spotify.com/track/" + trackID
 }
 
 func (h *Handler) latestRunIDsByMapping(ctx context.Context) (map[int]int, error) {

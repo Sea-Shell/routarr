@@ -30,11 +30,28 @@ const (
 )
 
 type TrackMatch struct {
+	YTVideoID      string
+	YTTitle        string
+	SPTrackID      string
+	SPTitle        string
+	SPArtist       string
+	Confidence     float64
+	Decision       MatchDecision
+	DecisionSource string // "matcher", "user", etc. — populated by GetMatch
+	// Candidates holds the top Spotify search results for the current run.
+	// Populated during dry-run; empty when loaded from track_matches.
+	Candidates []TrackMatchCandidate
+	// IsPriorChoice is true when the match was reused from a saved manual decision.
+	IsPriorChoice bool
+}
+
+// TrackMatchCandidate is one Spotify search result stored per sync run for review.
+type TrackMatchCandidate struct {
+	SyncRunID  int
 	YTVideoID  string
-	YTTitle    string
 	SPTrackID  string
 	SPTitle    string
 	SPArtist   string
 	Confidence float64
-	Decision   MatchDecision
+	Rank       int // 1-based position in the search results
 }
