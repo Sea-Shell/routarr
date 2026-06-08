@@ -998,19 +998,30 @@ func TestPickCandidate_InvalidMode(t *testing.T) {
 // The done channel is closed once RunDryInto is called, allowing tests to wait
 // for background goroutine completion deterministically.
 type dryRunnerIntoStub struct {
-	run     *domain.SyncRun    // run to populate (simulates pre-created run lookup)
+	run     *domain.SyncRun     // run to populate (simulates pre-created run lookup)
 	matches []domain.TrackMatch // results to return
 	err     error               // error to return
 	done    chan struct{}        // closed when RunDryInto is called
 	once    sync.Once
+	called  int // incremented each time RunDryInto is invoked; read with mu
+	mu      sync.Mutex
 }
 
 func (s *dryRunnerIntoStub) RunDryInto(ctx context.Context, run *domain.SyncRun, mappingID int) ([]domain.TrackMatch, error) {
+	s.mu.Lock()
+	s.called++
+	s.mu.Unlock()
 	s.once.Do(func() { close(s.done) })
 	if s.err != nil {
 		return nil, s.err
 	}
 	return s.matches, nil
+}
+
+func (s *dryRunnerIntoStub) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.called
 }
 
 // TestRunDrySync_ReturnsImmediatelyWithRunningStatus verifies that POST /mappings/{id}/sync:
@@ -1204,6 +1215,7 @@ VALUES ('yt-async-3', 'Async YT 3', 'sp-async-3', 'Async SP 3', datetime('now'),
 		t.Fatal("timed out waiting for background job")
 	}
 
+	// Give the goroutine time to persist final state before reading it back.
 	time.Sleep(50 * time.Millisecond)
 
 	var runStatus string
@@ -1226,5 +1238,79 @@ WHERE sr.mapping_id = ? AND sre.level = 'error'
 	}
 	if errEventCount == 0 {
 		t.Fatal("expected at least one error event, got 0")
+	}
+}
+
+// TestRunDrySync_DuplicateGuard_RedirectsToExistingRun verifies that when a
+// running sync_run already exists for the same mapping_id, POST
+// /mappings/{id}/sync returns 303 to /runs/{existingID}/progress, does NOT
+// create a second running row, and does NOT call the async runner.
+func TestRunDrySync_DuplicateGuard_RedirectsToExistingRun(t *testing.T) {
+	t.Parallel()
+
+	db, _, _ := newTestHandler(t)
+
+	// Insert a mapping.
+	_, err := db.ExecContext(t.Context(), `
+INSERT INTO playlist_mappings(youtube_playlist_id, youtube_playlist_title, spotify_playlist_id, spotify_playlist_title, created_at, updated_at)
+VALUES ('yt-dup-1', 'Dup YT', 'sp-dup-1', 'Dup SP', datetime('now'), datetime('now'))
+`)
+	if err != nil {
+		t.Fatalf("insert mapping: %v", err)
+	}
+	var mappingID int64
+	if err := db.QueryRowContext(t.Context(), `SELECT id FROM playlist_mappings WHERE youtube_playlist_id = 'yt-dup-1'`).Scan(&mappingID); err != nil {
+		t.Fatalf("get mapping id: %v", err)
+	}
+
+	// Pre-insert a running sync_run for this mapping (simulates an in-progress run).
+	res, err := db.ExecContext(t.Context(), `
+INSERT INTO sync_runs(mapping_id, status, started_at)
+VALUES (?, 'running', datetime('now'))
+`, mappingID)
+	if err != nil {
+		t.Fatalf("insert existing running sync run: %v", err)
+	}
+	existingRunID, _ := res.LastInsertId()
+
+	// Build a stub that would record a call if the async runner was started.
+	stub := &dryRunnerIntoStub{
+		done: make(chan struct{}),
+	}
+
+	h := newTestHandlerWithAsyncRunner(t, db, stub)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	resp := performRequest(t, mux, http.MethodPost,
+		fmt.Sprintf("/mappings/%d/sync", mappingID),
+		"", "",
+	)
+	readBody(t, resp) // drain
+
+	// Must redirect to the existing run's progress page.
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d (SeeOther)", resp.StatusCode, http.StatusSeeOther)
+	}
+	loc := resp.Header.Get("Location")
+	wantLoc := fmt.Sprintf("/runs/%d/progress", existingRunID)
+	if loc != wantLoc {
+		t.Fatalf("Location = %q, want %q", loc, wantLoc)
+	}
+
+	// Exactly one running row must exist — no second row was created.
+	var runningCount int
+	if err := db.QueryRowContext(t.Context(),
+		`SELECT COUNT(1) FROM sync_runs WHERE mapping_id = ? AND status = 'running'`, mappingID,
+	).Scan(&runningCount); err != nil {
+		t.Fatalf("count running rows: %v", err)
+	}
+	if runningCount != 1 {
+		t.Fatalf("running rows = %d, want 1 (no duplicate created)", runningCount)
+	}
+
+	// The async runner must NOT have been called.
+	if n := stub.callCount(); n != 0 {
+		t.Fatalf("async runner called %d times, want 0", n)
 	}
 }
