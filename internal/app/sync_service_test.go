@@ -876,3 +876,244 @@ func (m *rankAwareMatcherStub) Classify(_ float64) domain.MatchDecision {
 	}
 	return domain.MatchPending
 }
+
+// fakeProgressReporter is a test double for ports.ProgressReporter.
+type fakeProgressReporter struct {
+	calls []progressReportCall
+}
+
+type progressReportCall struct {
+	runID   int
+	level   string
+	message string
+}
+
+func (f *fakeProgressReporter) Report(_ context.Context, runID int, level, message string) {
+	f.calls = append(f.calls, progressReportCall{runID: runID, level: level, message: message})
+}
+
+// TestRunDryReportsProgressEvents verifies that RunDry emits the expected
+// ordered progress events when a reporter is wired and the run succeeds.
+func TestRunDryReportsProgressEvents(t *testing.T) {
+	t.Parallel()
+
+	mapping := &domain.PlaylistMapping{ID: 50, YTPlaylistID: "yt-playlist"}
+	videos := []domain.TrackMatch{
+		{YTVideoID: "vid-a", YTTitle: "Artist A - Track A"},
+		{YTVideoID: "vid-b", YTTitle: "Artist B - Track B"},
+	}
+	candidate := &domain.TrackMatch{SPTrackID: "sp-1", SPTitle: "Track A", SPArtist: "Artist A"}
+
+	mappingRepo := &mappingRepoStub{mapping: mapping}
+	matchRepo := &matchRepoStub{existing: map[string]*domain.TrackMatch{}}
+	yt := &youtubeServiceStub{videos: videos}
+	sp := &spotifyServiceStub{candidate: candidate}
+	matcher := &matcherStub{score: 0.91, decision: domain.MatchAuto}
+	reporter := &fakeProgressReporter{}
+
+	svc := NewSyncService(yt, sp, mappingRepo, matchRepo, matcher,
+		WithProgressReporter(reporter),
+	)
+
+	run, _, err := svc.RunDry(context.Background(), mapping.ID)
+	if err != nil {
+		t.Fatalf("RunDry() error = %v", err)
+	}
+	if run == nil {
+		t.Fatalf("RunDry() run is nil")
+	}
+
+	// All events must carry the saved run ID.
+	for i, call := range reporter.calls {
+		if call.runID != run.ID {
+			t.Errorf("event[%d] runID = %d, want %d", i, call.runID, run.ID)
+		}
+	}
+
+	// Verify minimum required events in order.
+	type wantEvent struct {
+		level   string
+		message string
+	}
+	want := []wantEvent{
+		{"info", "Created dry sync run"},
+		{"info", "Fetching YouTube playlist"},
+		{"info", "Fetched 2 YouTube videos"},
+		{"info", "Matching video 1/2: Artist A - Track A"},
+		{"info", "Matching video 2/2: Artist B - Track B"},
+		{"success", "Finished matching"},
+	}
+
+	if len(reporter.calls) < len(want) {
+		t.Fatalf("got %d progress events, want at least %d; events: %+v", len(reporter.calls), len(want), reporter.calls)
+	}
+
+	// Build an ordered sequence for exact-order check.
+	got := make([]wantEvent, len(reporter.calls))
+	for i, c := range reporter.calls {
+		got[i] = wantEvent{c.level, c.message}
+	}
+
+	// Check that want events appear as a subsequence (in order) within got.
+	wi := 0
+	for _, g := range got {
+		if wi < len(want) && g == want[wi] {
+			wi++
+		}
+	}
+	if wi != len(want) {
+		t.Errorf("expected progress events not found as ordered subsequence.\nwant: %+v\ngot:  %+v", want, got)
+	}
+}
+
+// TestRunDryReportsFetchError verifies that when YouTube playlist fetch fails
+// after the run is created, an error-level event is emitted with the run ID.
+func TestRunDryReportsFetchError(t *testing.T) {
+	t.Parallel()
+
+	mapping := &domain.PlaylistMapping{ID: 51, YTPlaylistID: "yt-error-playlist"}
+	fetchErr := errors.New("network timeout")
+
+	mappingRepo := &mappingRepoStub{mapping: mapping}
+	matchRepo := &matchRepoStub{}
+	yt := &youtubeServiceStub{err: fetchErr}
+	sp := &spotifyServiceStub{}
+	matcher := &matcherStub{}
+	reporter := &fakeProgressReporter{}
+
+	svc := NewSyncService(yt, sp, mappingRepo, matchRepo, matcher,
+		WithProgressReporter(reporter),
+	)
+
+	run, _, err := svc.RunDry(context.Background(), mapping.ID)
+	if err == nil {
+		t.Fatal("RunDry() expected error, got nil")
+	}
+	// run may be returned even on error (run was created before fetch)
+	_ = run
+
+	// Must have at least one error-level event.
+	var errEvents []progressReportCall
+	for _, c := range reporter.calls {
+		if c.level == "error" {
+			errEvents = append(errEvents, c)
+		}
+	}
+	if len(errEvents) == 0 {
+		t.Fatalf("expected at least one error-level progress event, got none; all events: %+v", reporter.calls)
+	}
+
+	// The error event must have a valid run ID (> 0 since run was created).
+	for _, e := range errEvents {
+		if e.runID <= 0 {
+			t.Errorf("error event runID = %d, want > 0", e.runID)
+		}
+	}
+}
+
+// TestRunDryIntoUsesPreCreatedRun verifies that RunDryInto does NOT call
+// SaveSyncRun: the caller owns run creation. It should use the provided run's
+// ID for progress reporting and match persistence.
+func TestRunDryIntoUsesPreCreatedRun(t *testing.T) {
+	t.Parallel()
+
+	mapping := &domain.PlaylistMapping{ID: 20, YTPlaylistID: "yt-playlist"}
+	videos := []domain.TrackMatch{{YTVideoID: "video-x", YTTitle: "Artist - Track"}}
+	candidate := &domain.TrackMatch{SPTrackID: "sp-1", SPTitle: "Track", SPArtist: "Artist"}
+
+	mappingRepo := &mappingRepoStub{mapping: mapping}
+	matchRepo := &matchRepoStub{existing: map[string]*domain.TrackMatch{}}
+	yt := &youtubeServiceStub{videos: videos}
+	sp := &spotifyServiceStub{candidate: candidate}
+	m := &matcherStub{score: 0.91, decision: domain.MatchAuto}
+
+	svc := NewSyncService(yt, sp, mappingRepo, matchRepo, m)
+
+	// Pre-created run with ID already set — simulates caller creating run first.
+	preRun := &domain.SyncRun{
+		ID:        42,
+		MappingID: mapping.ID,
+		Status:    syncRunStatusRunning,
+		StartedAt: time.Now().UTC(),
+	}
+
+	matches, err := svc.RunDryInto(context.Background(), preRun, mapping.ID)
+	if err != nil {
+		t.Fatalf("RunDryInto() error = %v", err)
+	}
+
+	// SaveSyncRun must NOT be called — caller owns the run.
+	if mappingRepo.saveRunCalls != 0 {
+		t.Fatalf("SaveSyncRun called %d times, want 0", mappingRepo.saveRunCalls)
+	}
+
+	if len(matches) != 1 {
+		t.Fatalf("matches = %d, want 1", len(matches))
+	}
+	if matches[0].YTVideoID != "video-x" {
+		t.Fatalf("match YTVideoID = %q, want video-x", matches[0].YTVideoID)
+	}
+}
+
+// TestRunDryIntoReportsProgressWithPreCreatedRunID verifies that progress
+// events use the pre-created run's ID, not a freshly-generated one.
+func TestRunDryIntoReportsProgressWithPreCreatedRunID(t *testing.T) {
+	t.Parallel()
+
+	mapping := &domain.PlaylistMapping{ID: 21, YTPlaylistID: "yt-playlist"}
+	videos := []domain.TrackMatch{{YTVideoID: "v1", YTTitle: "Title"}}
+	candidate := &domain.TrackMatch{SPTrackID: "sp-2", SPTitle: "Title", SPArtist: "Artist"}
+
+	mappingRepo := &mappingRepoStub{mapping: mapping}
+	matchRepo := &matchRepoStub{existing: map[string]*domain.TrackMatch{}}
+	yt := &youtubeServiceStub{videos: videos}
+	sp := &spotifyServiceStub{candidate: candidate}
+	m := &matcherStub{score: 0.91, decision: domain.MatchAuto}
+	reporter := &fakeProgressReporter{}
+
+	svc := NewSyncService(yt, sp, mappingRepo, matchRepo, m,
+		WithProgressReporter(reporter),
+	)
+
+	preRun := &domain.SyncRun{ID: 99, MappingID: mapping.ID, Status: syncRunStatusRunning, StartedAt: time.Now().UTC()}
+
+	_, err := svc.RunDryInto(context.Background(), preRun, mapping.ID)
+	if err != nil {
+		t.Fatalf("RunDryInto() error = %v", err)
+	}
+
+	if len(reporter.calls) == 0 {
+		t.Fatal("expected progress events, got none")
+	}
+	for _, c := range reporter.calls {
+		if c.runID != 99 {
+			t.Errorf("progress event runID = %d, want 99", c.runID)
+		}
+	}
+}
+
+// TestWithProgressReporterWiresReporter verifies that WithProgressReporter
+// stores the reporter on the SyncService so it is available for use later.
+func TestWithProgressReporterWiresReporter(t *testing.T) {
+	t.Parallel()
+
+	mapping := &domain.PlaylistMapping{ID: 1, YTPlaylistID: "yt-playlist"}
+	mappingRepo := &mappingRepoStub{mapping: mapping}
+	matchRepo := &matchRepoStub{}
+	yt := &youtubeServiceStub{}
+	sp := &spotifyServiceStub{}
+	matcher := &matcherStub{}
+
+	reporter := &fakeProgressReporter{}
+
+	svc := NewSyncService(yt, sp, mappingRepo, matchRepo, matcher,
+		WithProgressReporter(reporter),
+	)
+
+	if svc.progressReporter == nil {
+		t.Fatal("expected progressReporter to be set, got nil")
+	}
+	if svc.progressReporter != reporter {
+		t.Fatal("expected progressReporter to be the supplied reporter instance")
+	}
+}

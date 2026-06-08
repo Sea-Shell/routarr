@@ -118,6 +118,21 @@ CREATE TABLE IF NOT EXISTS track_match_candidates (
 );
 CREATE INDEX IF NOT EXISTS idx_tmc_run_video ON track_match_candidates(sync_run_id, youtube_video_id);`,
 	},
+	{
+		version: 9,
+		name:    "create_sync_run_events",
+		query: `
+CREATE TABLE IF NOT EXISTS sync_run_events (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	sync_run_id INTEGER NOT NULL,
+	created_at DATETIME NOT NULL,
+	level TEXT NOT NULL,
+	message TEXT NOT NULL,
+	details TEXT NOT NULL DEFAULT '',
+	FOREIGN KEY(sync_run_id) REFERENCES sync_runs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_sync_run_events_sync_run_id ON sync_run_events(sync_run_id);`,
+	},
 }
 
 func Open(path string) (*sql.DB, error) {

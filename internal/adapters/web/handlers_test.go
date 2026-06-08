@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -383,6 +384,27 @@ func newTestHandler(t *testing.T, syncServices ...syncCommitter) (*sql.DB, *Hand
 	return db, h, mux
 }
 
+// newTestHandlerWithAsyncRunner creates a Handler wired with a fake asyncDryRunner
+// for testing the async POST /mappings/{id}/sync flow.
+func newTestHandlerWithAsyncRunner(t *testing.T, db *sql.DB, runner asyncDryRunner) *Handler {
+	t.Helper()
+
+	h, err := NewHandler(
+		db,
+		sqlite.NewMappingRepository(db),
+		"http://localhost:8080",
+		"test-yt-client-id",
+		"test-yt-secret",
+		"test-sp-client-id",
+		"test-sp-secret",
+	)
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	h.asyncRunner = runner
+	return h
+}
+
 func setProviderConnected(t *testing.T, db *sql.DB, provider string) {
 	t.Helper()
 
@@ -720,6 +742,235 @@ SELECT selected_spotify_track_id FROM sync_items WHERE sync_run_id = ? AND youtu
 	}
 }
 
+// TestSyncRunEvents returns JSON with event list, run status, pending count, and URLs.
+func TestSyncRunEvents(t *testing.T) {
+	t.Parallel()
+
+	db, _, mux := newTestHandler(t)
+
+	// Insert mapping + sync run.
+	_, err := db.ExecContext(t.Context(), `
+INSERT INTO playlist_mappings(youtube_playlist_id, youtube_playlist_title, spotify_playlist_id, spotify_playlist_title, created_at, updated_at)
+VALUES ('yt-ev-pl', 'EV Playlist', 'sp-ev-pl', 'EV SP Playlist', datetime('now'), datetime('now'))
+`)
+	if err != nil {
+		t.Fatalf("insert mapping: %v", err)
+	}
+
+	var mappingID int64
+	if err := db.QueryRowContext(t.Context(), `SELECT id FROM playlist_mappings WHERE youtube_playlist_id = 'yt-ev-pl'`).Scan(&mappingID); err != nil {
+		t.Fatalf("get mapping id: %v", err)
+	}
+
+	res, err := db.ExecContext(t.Context(), `
+INSERT INTO sync_runs(mapping_id, status, started_at) VALUES (?, 'completed', datetime('now'))
+`, mappingID)
+	if err != nil {
+		t.Fatalf("insert sync run: %v", err)
+	}
+	runID, _ := res.LastInsertId()
+
+	// Insert two events.
+	eventRepo := sqlite.NewSyncRunEventRepository(db)
+	ev1 := &domain.SyncRunEvent{RunID: int(runID), Level: "info", Message: "Started sync", Details: ""}
+	ev2 := &domain.SyncRunEvent{RunID: int(runID), Level: "info", Message: "Sync complete", Details: "2 tracks"}
+	if err := eventRepo.SaveSyncRunEvent(t.Context(), ev1); err != nil {
+		t.Fatalf("save event 1: %v", err)
+	}
+	if err := eventRepo.SaveSyncRunEvent(t.Context(), ev2); err != nil {
+		t.Fatalf("save event 2: %v", err)
+	}
+
+	resp := performRequest(t, mux, http.MethodGet, fmt.Sprintf("/runs/%d/events", runID), "", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /runs/%d/events status = %d, want %d; body: %s", runID, resp.StatusCode, http.StatusOK, readBody(t, resp))
+	}
+
+	ct := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("Content-Type = %q, want application/json prefix", ct)
+	}
+
+	body := readBody(t, resp)
+	var payload struct {
+		Run struct {
+			ID     int    `json:"id"`
+			Status string `json:"status"`
+		} `json:"run"`
+		Events []struct {
+			ID      int    `json:"id"`
+			Level   string `json:"level"`
+			Message string `json:"message"`
+			Details string `json:"details"`
+		} `json:"events"`
+		PendingCount int `json:"pending_count"`
+		URLs         struct {
+			Results string `json:"results"`
+			Review  string `json:"review"`
+			Routes  string `json:"routes"`
+		} `json:"urls"`
+	}
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v; body: %s", err, body)
+	}
+
+	if payload.Run.ID != int(runID) {
+		t.Errorf("run.id = %d, want %d", payload.Run.ID, int(runID))
+	}
+	if payload.Run.Status != "completed" {
+		t.Errorf("run.status = %q, want %q", payload.Run.Status, "completed")
+	}
+	if len(payload.Events) != 2 {
+		t.Fatalf("events len = %d, want 2", len(payload.Events))
+	}
+	if payload.Events[0].Message != "Started sync" {
+		t.Errorf("events[0].message = %q, want %q", payload.Events[0].Message, "Started sync")
+	}
+	if payload.Events[1].Message != "Sync complete" {
+		t.Errorf("events[1].message = %q, want %q", payload.Events[1].Message, "Sync complete")
+	}
+	if payload.Events[1].Details != "2 tracks" {
+		t.Errorf("events[1].details = %q, want %q", payload.Events[1].Details, "2 tracks")
+	}
+	// pending_count must be present (zero is fine — no track_matches in this run).
+	_ = payload.PendingCount
+	if payload.URLs.Results == "" {
+		t.Errorf("urls.results is empty")
+	}
+	if payload.URLs.Review == "" {
+		t.Errorf("urls.review is empty")
+	}
+	if payload.URLs.Routes == "" {
+		t.Errorf("urls.routes is empty")
+	}
+}
+
+// TestSyncRunEvents_NotFound returns 404 for nonexistent run.
+func TestSyncRunEvents_NotFound(t *testing.T) {
+	t.Parallel()
+
+	_, _, mux := newTestHandler(t)
+	resp := performRequest(t, mux, http.MethodGet, "/runs/9999/events", "", "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET /runs/9999/events status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+	readBody(t, resp) // drain
+}
+
+// TestSyncProgressPage renders progress page with terminal panel and poll URL.
+func TestSyncProgressPage(t *testing.T) {
+	t.Parallel()
+
+	db, _, mux := newTestHandler(t)
+
+	_, err := db.ExecContext(t.Context(), `
+INSERT INTO playlist_mappings(youtube_playlist_id, youtube_playlist_title, spotify_playlist_id, spotify_playlist_title, created_at, updated_at)
+VALUES ('yt-pg-pl', 'PG Playlist', 'sp-pg-pl', 'PG SP Playlist', datetime('now'), datetime('now'))
+`)
+	if err != nil {
+		t.Fatalf("insert mapping: %v", err)
+	}
+
+	var mappingID int64
+	if err := db.QueryRowContext(t.Context(), `SELECT id FROM playlist_mappings WHERE youtube_playlist_id = 'yt-pg-pl'`).Scan(&mappingID); err != nil {
+		t.Fatalf("get mapping id: %v", err)
+	}
+
+	res, err := db.ExecContext(t.Context(), `
+INSERT INTO sync_runs(mapping_id, status, started_at) VALUES (?, 'running', datetime('now'))
+`, mappingID)
+	if err != nil {
+		t.Fatalf("insert sync run: %v", err)
+	}
+	runID, _ := res.LastInsertId()
+
+	resp := performRequest(t, mux, http.MethodGet, fmt.Sprintf("/runs/%d/progress", runID), "", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /runs/%d/progress status = %d, want %d; body: %s", runID, resp.StatusCode, http.StatusOK, readBody(t, resp))
+	}
+
+	body := readBody(t, resp)
+	eventsURL := fmt.Sprintf("/runs/%d/events", runID)
+	if !strings.Contains(body, eventsURL) {
+		t.Errorf("progress page body missing events poll URL %q", eventsURL)
+	}
+	// Expect a log/terminal-style container in the page.
+	if !strings.Contains(body, "sync-log") && !strings.Contains(body, "progress") {
+		t.Errorf("progress page body missing terminal/log container marker; got: %q", body[:min(200, len(body))])
+	}
+}
+
+// TestSyncProgressPage_Completed shows action buttons when run is completed and pending items exist.
+func TestSyncProgressPage_Completed(t *testing.T) {
+	t.Parallel()
+
+	db, _, mux := newTestHandler(t)
+
+	_, err := db.ExecContext(t.Context(), `
+INSERT INTO playlist_mappings(youtube_playlist_id, youtube_playlist_title, spotify_playlist_id, spotify_playlist_title, created_at, updated_at)
+VALUES ('yt-cp-pl', 'CP Playlist', 'sp-cp-pl', 'CP SP Playlist', datetime('now'), datetime('now'))
+`)
+	if err != nil {
+		t.Fatalf("insert mapping: %v", err)
+	}
+
+	var mappingID int64
+	if err := db.QueryRowContext(t.Context(), `SELECT id FROM playlist_mappings WHERE youtube_playlist_id = 'yt-cp-pl'`).Scan(&mappingID); err != nil {
+		t.Fatalf("get mapping id: %v", err)
+	}
+
+	res, err := db.ExecContext(t.Context(), `
+INSERT INTO sync_runs(mapping_id, status, started_at) VALUES (?, 'completed', datetime('now'))
+`, mappingID)
+	if err != nil {
+		t.Fatalf("insert sync run: %v", err)
+	}
+	runID, _ := res.LastInsertId()
+
+	// Add a pending track match to trigger "Review Matches" button.
+	_, err = db.ExecContext(t.Context(), `
+INSERT INTO track_matches(youtube_video_id, youtube_title, spotify_track_id, spotify_track_title, spotify_artist, confidence, decision, decision_source)
+VALUES ('yt-cp-vid', 'CP Title', '', '', '', 0.5, 'pending', 'auto')
+`)
+	if err != nil {
+		t.Fatalf("insert track match: %v", err)
+	}
+	_, err = db.ExecContext(t.Context(), `
+INSERT INTO sync_items(sync_run_id, youtube_video_id, action) VALUES (?, 'yt-cp-vid', 'add')
+`, runID)
+	if err != nil {
+		t.Fatalf("insert sync item: %v", err)
+	}
+
+	resp := performRequest(t, mux, http.MethodGet, fmt.Sprintf("/runs/%d/progress", runID), "", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /runs/%d/progress status = %d, want %d; body: %s", runID, resp.StatusCode, http.StatusOK, readBody(t, resp))
+	}
+
+	body := readBody(t, resp)
+	if !strings.Contains(body, "View Results") {
+		t.Errorf("progress page body missing 'View Results' button; snippet: %q", body[:min(500, len(body))])
+	}
+	if !strings.Contains(body, "Review Matches") {
+		t.Errorf("progress page body missing 'Review Matches' button; snippet: %q", body[:min(500, len(body))])
+	}
+	if !strings.Contains(body, "Back to Routes") {
+		t.Errorf("progress page body missing 'Back to Routes' button; snippet: %q", body[:min(500, len(body))])
+	}
+}
+
+// TestSyncProgressPage_NotFound returns 404 for nonexistent run.
+func TestSyncProgressPage_NotFound(t *testing.T) {
+	t.Parallel()
+
+	_, _, mux := newTestHandler(t)
+	resp := performRequest(t, mux, http.MethodGet, "/runs/9999/progress", "", "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET /runs/9999/progress status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+	readBody(t, resp) // drain
+}
+
 // TestPickCandidate_InvalidMode verifies that an unrecognised mode returns 400.
 func TestPickCandidate_InvalidMode(t *testing.T) {
 	t.Parallel()
@@ -741,4 +992,329 @@ func TestPickCandidate_InvalidMode(t *testing.T) {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
 	readBody(t, resp) // drain
+}
+
+// dryRunnerIntoStub is a controllable fake for the asyncDryRunner interface.
+// The done channel is closed once RunDryInto is called, allowing tests to wait
+// for background goroutine completion deterministically.
+type dryRunnerIntoStub struct {
+	run     *domain.SyncRun     // run to populate (simulates pre-created run lookup)
+	matches []domain.TrackMatch // results to return
+	err     error               // error to return
+	done    chan struct{}        // closed when RunDryInto is called
+	once    sync.Once
+	called  int // incremented each time RunDryInto is invoked; read with mu
+	mu      sync.Mutex
+}
+
+func (s *dryRunnerIntoStub) RunDryInto(ctx context.Context, run *domain.SyncRun, mappingID int) ([]domain.TrackMatch, error) {
+	s.mu.Lock()
+	s.called++
+	s.mu.Unlock()
+	s.once.Do(func() { close(s.done) })
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.matches, nil
+}
+
+func (s *dryRunnerIntoStub) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.called
+}
+
+// TestRunDrySync_ReturnsImmediatelyWithRunningStatus verifies that POST /mappings/{id}/sync:
+// 1. Creates a sync_run row in the DB with status="running" before redirecting.
+// 2. Returns 303 to /runs/{id}/progress (not /runs/{id}).
+// 3. Does not block until dry sync completes.
+func TestRunDrySync_ReturnsImmediatelyWithRunningStatus(t *testing.T) {
+	t.Parallel()
+
+	db, _, _ := newTestHandler(t)
+
+	// Insert a mapping so handler can look it up.
+	_, err := db.ExecContext(t.Context(), `
+INSERT INTO playlist_mappings(youtube_playlist_id, youtube_playlist_title, spotify_playlist_id, spotify_playlist_title, created_at, updated_at)
+VALUES ('yt-async-1', 'Async YT', 'sp-async-1', 'Async SP', datetime('now'), datetime('now'))
+`)
+	if err != nil {
+		t.Fatalf("insert mapping: %v", err)
+	}
+	var mappingID int64
+	if err := db.QueryRowContext(t.Context(), `SELECT id FROM playlist_mappings WHERE youtube_playlist_id = 'yt-async-1'`).Scan(&mappingID); err != nil {
+		t.Fatalf("get mapping id: %v", err)
+	}
+
+	done := make(chan struct{})
+	stub := &dryRunnerIntoStub{
+		done:    done,
+		matches: []domain.TrackMatch{{YTVideoID: "v1"}},
+	}
+
+	h := newTestHandlerWithAsyncRunner(t, db, stub)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	// Perform the POST — should return immediately.
+	resp := performRequest(t, mux, http.MethodPost,
+		fmt.Sprintf("/mappings/%d/sync", mappingID),
+		"", "",
+	)
+
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusSeeOther, readBody(t, resp))
+	}
+
+	loc := resp.Header.Get("Location")
+	if !strings.Contains(loc, "/progress") {
+		t.Fatalf("Location = %q, want path ending in /progress", loc)
+	}
+
+	// A sync_run row must exist before we process response.
+	var runStatus string
+	err = db.QueryRowContext(t.Context(), `SELECT status FROM sync_runs WHERE mapping_id = ?`, mappingID).Scan(&runStatus)
+	if err != nil {
+		t.Fatalf("query sync run: %v", err)
+	}
+	if runStatus != syncRunStatusRunning && runStatus != syncRunStatusCompleted {
+		t.Fatalf("run status = %q, want %q or %q", runStatus, syncRunStatusRunning, syncRunStatusCompleted)
+	}
+
+	// Wait for background goroutine to finish.
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for background job")
+	}
+}
+
+// TestRunDrySync_BackgroundJobSavesEvents verifies that after the background
+// goroutine completes, progress events are persisted and the run is marked completed.
+func TestRunDrySync_BackgroundJobSavesEvents(t *testing.T) {
+	t.Parallel()
+
+	db, _, _ := newTestHandler(t)
+
+	_, err := db.ExecContext(t.Context(), `
+INSERT INTO playlist_mappings(youtube_playlist_id, youtube_playlist_title, spotify_playlist_id, spotify_playlist_title, created_at, updated_at)
+VALUES ('yt-async-2', 'Async YT 2', 'sp-async-2', 'Async SP 2', datetime('now'), datetime('now'))
+`)
+	if err != nil {
+		t.Fatalf("insert mapping: %v", err)
+	}
+	var mappingID int64
+	if err := db.QueryRowContext(t.Context(), `SELECT id FROM playlist_mappings WHERE youtube_playlist_id = 'yt-async-2'`).Scan(&mappingID); err != nil {
+		t.Fatalf("get mapping id: %v", err)
+	}
+
+	// Pre-insert track_match so sync_items FK is satisfied when the goroutine persists items.
+	_, err = db.ExecContext(t.Context(), `
+INSERT INTO track_matches(youtube_video_id, youtube_title, spotify_track_id, spotify_track_title, spotify_artist, confidence, decision, decision_source)
+VALUES ('yt-bg-1', 'BG Track', 'sp-bg-1', 'BG Spotify', 'BG Artist', 0.9, 'auto', 'matcher')
+`)
+	if err != nil {
+		t.Fatalf("insert track match: %v", err)
+	}
+
+	done := make(chan struct{})
+	stub := &dryRunnerIntoStub{
+		done:    done,
+		matches: []domain.TrackMatch{{YTVideoID: "yt-bg-1"}},
+	}
+
+	h := newTestHandlerWithAsyncRunner(t, db, stub)
+
+	// Install deterministic completion hook: closed after all DB writes finish.
+	jobDone := make(chan int, 1)
+	h.asyncJobDone = func(runID int) { jobDone <- runID }
+
+	mux2 := http.NewServeMux()
+	h.RegisterRoutes(mux2)
+
+	resp := performRequest(t, mux2, http.MethodPost,
+		fmt.Sprintf("/mappings/%d/sync", mappingID),
+		"", "",
+	)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusSeeOther, readBody(t, resp))
+	}
+	readBody(t, resp) // drain
+
+	// Wait for background goroutine to finish (all DB writes attempted).
+	select {
+	case <-jobDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for background job")
+	}
+
+	// The run should be marked completed or failed (not running anymore).
+	var runStatus string
+	err = db.QueryRowContext(t.Context(), `SELECT status FROM sync_runs WHERE mapping_id = ?`, mappingID).Scan(&runStatus)
+	if err != nil {
+		t.Fatalf("query sync run: %v", err)
+	}
+	if runStatus == syncRunStatusRunning {
+		t.Fatalf("run status = %q, want completed or failed (not running)", runStatus)
+	}
+
+	// sync_items must have been persisted.
+	var itemCount int
+	err = db.QueryRowContext(t.Context(), `
+SELECT COUNT(1) FROM sync_items si
+JOIN sync_runs sr ON sr.id = si.sync_run_id
+WHERE sr.mapping_id = ?
+`, mappingID).Scan(&itemCount)
+	if err != nil {
+		t.Fatalf("query sync items: %v", err)
+	}
+	if itemCount == 0 {
+		t.Fatal("expected sync_items to be persisted, got 0")
+	}
+}
+
+// TestRunDrySync_FailedJobMarksRunFailed verifies that when the background
+// job returns an error, the run is marked with status="failed".
+func TestRunDrySync_FailedJobMarksRunFailed(t *testing.T) {
+	t.Parallel()
+
+	db, _, _ := newTestHandler(t)
+
+	_, err := db.ExecContext(t.Context(), `
+INSERT INTO playlist_mappings(youtube_playlist_id, youtube_playlist_title, spotify_playlist_id, spotify_playlist_title, created_at, updated_at)
+VALUES ('yt-async-3', 'Async YT 3', 'sp-async-3', 'Async SP 3', datetime('now'), datetime('now'))
+`)
+	if err != nil {
+		t.Fatalf("insert mapping: %v", err)
+	}
+	var mappingID int64
+	if err := db.QueryRowContext(t.Context(), `SELECT id FROM playlist_mappings WHERE youtube_playlist_id = 'yt-async-3'`).Scan(&mappingID); err != nil {
+		t.Fatalf("get mapping id: %v", err)
+	}
+
+	done := make(chan struct{})
+	stub := &dryRunnerIntoStub{
+		done: done,
+		err:  fmt.Errorf("simulated dry sync failure"),
+	}
+
+	h := newTestHandlerWithAsyncRunner(t, db, stub)
+
+	// Install deterministic completion hook.
+	jobDone := make(chan int, 1)
+	h.asyncJobDone = func(runID int) { jobDone <- runID }
+
+	mux2 := http.NewServeMux()
+	h.RegisterRoutes(mux2)
+
+	resp := performRequest(t, mux2, http.MethodPost,
+		fmt.Sprintf("/mappings/%d/sync", mappingID),
+		"", "",
+	)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusSeeOther, readBody(t, resp))
+	}
+	readBody(t, resp)
+
+	select {
+	case <-jobDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for background job")
+	}
+
+	var runStatus string
+	err = db.QueryRowContext(t.Context(), `SELECT status FROM sync_runs WHERE mapping_id = ?`, mappingID).Scan(&runStatus)
+	if err != nil {
+		t.Fatalf("query sync run: %v", err)
+	}
+	if runStatus != syncRunStatusFailed {
+		t.Fatalf("run status = %q, want %q", runStatus, syncRunStatusFailed)
+	}
+
+	// A "failed" progress event must exist.
+	var errEventCount int
+	if qErr := db.QueryRowContext(t.Context(), `
+SELECT COUNT(1) FROM sync_run_events sre
+JOIN sync_runs sr ON sr.id = sre.sync_run_id
+WHERE sr.mapping_id = ? AND sre.level = 'error'
+`, mappingID).Scan(&errEventCount); qErr != nil {
+		t.Fatalf("query error events: %v", qErr)
+	}
+	if errEventCount == 0 {
+		t.Fatal("expected at least one error event, got 0")
+	}
+}
+
+// TestRunDrySync_DuplicateGuard_RedirectsToExistingRun verifies that when a
+// running sync_run already exists for the same mapping_id, POST
+// /mappings/{id}/sync returns 303 to /runs/{existingID}/progress, does NOT
+// create a second running row, and does NOT call the async runner.
+func TestRunDrySync_DuplicateGuard_RedirectsToExistingRun(t *testing.T) {
+	t.Parallel()
+
+	db, _, _ := newTestHandler(t)
+
+	// Insert a mapping.
+	_, err := db.ExecContext(t.Context(), `
+INSERT INTO playlist_mappings(youtube_playlist_id, youtube_playlist_title, spotify_playlist_id, spotify_playlist_title, created_at, updated_at)
+VALUES ('yt-dup-1', 'Dup YT', 'sp-dup-1', 'Dup SP', datetime('now'), datetime('now'))
+`)
+	if err != nil {
+		t.Fatalf("insert mapping: %v", err)
+	}
+	var mappingID int64
+	if err := db.QueryRowContext(t.Context(), `SELECT id FROM playlist_mappings WHERE youtube_playlist_id = 'yt-dup-1'`).Scan(&mappingID); err != nil {
+		t.Fatalf("get mapping id: %v", err)
+	}
+
+	// Pre-insert a running sync_run for this mapping (simulates an in-progress run).
+	res, err := db.ExecContext(t.Context(), `
+INSERT INTO sync_runs(mapping_id, status, started_at)
+VALUES (?, 'running', datetime('now'))
+`, mappingID)
+	if err != nil {
+		t.Fatalf("insert existing running sync run: %v", err)
+	}
+	existingRunID, _ := res.LastInsertId()
+
+	// Build a stub that would record a call if the async runner was started.
+	stub := &dryRunnerIntoStub{
+		done: make(chan struct{}),
+	}
+
+	h := newTestHandlerWithAsyncRunner(t, db, stub)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	resp := performRequest(t, mux, http.MethodPost,
+		fmt.Sprintf("/mappings/%d/sync", mappingID),
+		"", "",
+	)
+	readBody(t, resp) // drain
+
+	// Must redirect to the existing run's progress page.
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d (SeeOther)", resp.StatusCode, http.StatusSeeOther)
+	}
+	loc := resp.Header.Get("Location")
+	wantLoc := fmt.Sprintf("/runs/%d/progress", existingRunID)
+	if loc != wantLoc {
+		t.Fatalf("Location = %q, want %q", loc, wantLoc)
+	}
+
+	// Exactly one running row must exist — no second row was created.
+	var runningCount int
+	if err := db.QueryRowContext(t.Context(),
+		`SELECT COUNT(1) FROM sync_runs WHERE mapping_id = ? AND status = 'running'`, mappingID,
+	).Scan(&runningCount); err != nil {
+		t.Fatalf("count running rows: %v", err)
+	}
+	if runningCount != 1 {
+		t.Fatalf("running rows = %d, want 1 (no duplicate created)", runningCount)
+	}
+
+	// The async runner must NOT have been called.
+	if n := stub.callCount(); n != 0 {
+		t.Fatalf("async runner called %d times, want 0", n)
+	}
 }
