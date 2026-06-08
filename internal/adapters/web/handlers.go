@@ -26,6 +26,7 @@ import (
 	"github.com/bateau84/yt2sp/internal/ports"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
+	"golang.org/x/sync/errgroup"
 	spotifyoauth "golang.org/x/oauth2/spotify"
 )
 
@@ -52,6 +53,8 @@ type Handler struct {
 	candidateRepo ports.CandidateRepository
 	eventRepo     ports.SyncRunEventRepository
 	syncService   syncCommitter
+	ytService     ports.YouTubeService
+	spService     ports.SpotifyService
 	// asyncRunner performs the background dry sync. Set in production by
 	// buildAsyncRunner; overridable in tests.
 	asyncRunner asyncDryRunner
@@ -106,8 +109,10 @@ type indexMappingView struct {
 }
 
 type mappingFormData struct {
-	Flash string
-	Error string
+	Flash             string
+	Error             string
+	YouTubePlaylists  []ports.PlaylistSummary
+	SpotifyPlaylists  []ports.PlaylistSummary
 }
 
 type syncRunView struct {
@@ -217,7 +222,7 @@ type syncProgressURLsJSON struct {
 	Routes  string `json:"routes"`
 }
 
-func NewHandler(db *sql.DB, mappingRepo ports.MappingRepository, oauthBaseURL, ytClientID, ytSecret, spClientID, spSecret string, syncServices ...syncCommitter) (*Handler, error) {
+func NewHandler(db *sql.DB, mappingRepo ports.MappingRepository, oauthBaseURL, ytClientID, ytSecret, spClientID, spSecret string, ytService ports.YouTubeService, spService ports.SpotifyService, syncServices ...syncCommitter) (*Handler, error) {
 	if db == nil {
 		return nil, fmt.Errorf("web handler db is nil")
 	}
@@ -253,6 +258,8 @@ func NewHandler(db *sql.DB, mappingRepo ports.MappingRepository, oauthBaseURL, y
 		candidateRepo: sqlite.NewCandidateRepository(db),
 		eventRepo:     sqlite.NewSyncRunEventRepository(db),
 		syncService:   syncService,
+		ytService:     ytService,
+		spService:     spService,
 		templates:     tmpls,
 		oauthConfigs: map[string]*oauth2.Config{
 			providerYouTube: {
@@ -351,7 +358,39 @@ func (h *Handler) index(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) createMappingForm(w http.ResponseWriter, r *http.Request) {
-	h.render(w, "mapping_form.gohtml", mappingFormData{Flash: strings.TrimSpace(r.URL.Query().Get("flash"))})
+	ctx := r.Context()
+	var ytPlaylists, spPlaylists []ports.PlaylistSummary
+
+	g, gctx := errgroup.WithContext(ctx)
+	if h.ytService != nil {
+		g.Go(func() error {
+			pl, err := h.ytService.ListUserPlaylists(gctx)
+			if err != nil {
+				slog.Warn("failed to fetch YouTube playlists", "error", err)
+				return nil
+			}
+			ytPlaylists = pl
+			return nil
+		})
+	}
+	if h.spService != nil {
+		g.Go(func() error {
+			pl, err := h.spService.ListUserPlaylists(gctx)
+			if err != nil {
+				slog.Warn("failed to fetch Spotify playlists", "error", err)
+				return nil
+			}
+			spPlaylists = pl
+			return nil
+		})
+	}
+	_ = g.Wait()
+
+	h.render(w, "mapping_form.gohtml", mappingFormData{
+		Flash:             strings.TrimSpace(r.URL.Query().Get("flash")),
+		YouTubePlaylists:  ytPlaylists,
+		SpotifyPlaylists:  spPlaylists,
+	})
 }
 
 func (h *Handler) createMapping(w http.ResponseWriter, r *http.Request) {
@@ -360,16 +399,31 @@ func (h *Handler) createMapping(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ytID := strings.TrimSpace(r.FormValue("youtube_playlist_id"))
-	spID := strings.TrimSpace(r.FormValue("spotify_playlist_id"))
+	ytSelect := strings.TrimSpace(r.FormValue("youtube_playlist_id_select"))
+	spSelect := strings.TrimSpace(r.FormValue("spotify_playlist_id_select"))
+
+	ytID := ytSelect
+	if ytSelect == "__manual__" {
+		ytID = strings.TrimSpace(r.FormValue("youtube_playlist_id"))
+	} else if ytSelect == "" {
+		// Backward compat: if no select field, use direct input
+		ytID = strings.TrimSpace(r.FormValue("youtube_playlist_id"))
+	}
+
+	spID := spSelect
+	if spSelect == "__manual__" {
+		spID = strings.TrimSpace(r.FormValue("spotify_playlist_id"))
+	} else if spSelect == "" {
+		// Backward compat: if no select field, use direct input
+		spID = strings.TrimSpace(r.FormValue("spotify_playlist_id"))
+	}
+
 	ytTitle := strings.TrimSpace(r.FormValue("youtube_playlist_title"))
 	spTitle := strings.TrimSpace(r.FormValue("spotify_playlist_title"))
 
 	if ytID == "" || spID == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		h.render(w, "mapping_form.gohtml", mappingFormData{
-			Error: "YouTube playlist ID and Spotify playlist ID are required.",
-		})
+		h.renderFormWithError(w, r, "YouTube playlist ID and Spotify playlist ID are required.")
 		return
 	}
 
@@ -389,13 +443,47 @@ func (h *Handler) createMapping(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.mappingRepo.Save(r.Context(), mapping); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		h.render(w, "mapping_form.gohtml", mappingFormData{
-			Error: fmt.Sprintf("save mapping: %v", err),
-		})
+		h.renderFormWithError(w, r, fmt.Sprintf("save mapping: %v", err))
 		return
 	}
 
 	http.Redirect(w, r, "/?flash=Mapping+created", http.StatusSeeOther)
+}
+
+func (h *Handler) renderFormWithError(w http.ResponseWriter, r *http.Request, errMsg string) {
+	ctx := r.Context()
+	var ytPlaylists, spPlaylists []ports.PlaylistSummary
+
+	g, gctx := errgroup.WithContext(ctx)
+	if h.ytService != nil {
+		g.Go(func() error {
+			pl, err := h.ytService.ListUserPlaylists(gctx)
+			if err != nil {
+				slog.Warn("failed to fetch YouTube playlists", "error", err)
+				return nil
+			}
+			ytPlaylists = pl
+			return nil
+		})
+	}
+	if h.spService != nil {
+		g.Go(func() error {
+			pl, err := h.spService.ListUserPlaylists(gctx)
+			if err != nil {
+				slog.Warn("failed to fetch Spotify playlists", "error", err)
+				return nil
+			}
+			spPlaylists = pl
+			return nil
+		})
+	}
+	_ = g.Wait()
+
+	h.render(w, "mapping_form.gohtml", mappingFormData{
+		Error:            errMsg,
+		YouTubePlaylists: ytPlaylists,
+		SpotifyPlaylists: spPlaylists,
+	})
 }
 
 func (h *Handler) deleteMapping(w http.ResponseWriter, r *http.Request) {

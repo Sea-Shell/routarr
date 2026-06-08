@@ -301,6 +301,87 @@ func (a *Adapter) AddTrackToPlaylist(ctx context.Context, playlistID, trackID st
 	return nil
 }
 
+func (a *Adapter) ListUserPlaylists(ctx context.Context) ([]ports.PlaylistSummary, error) {
+	if a == nil || a.client == nil {
+		return nil, fmt.Errorf("spotify adapter is not initialized")
+	}
+	if a.token == "" {
+		return nil, fmt.Errorf("spotify oauth token is empty")
+	}
+
+	baseURL, err := url.Parse(a.baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse spotify base url: %w", err)
+	}
+
+	endpoint, err := url.Parse(a.baseURL + "/v1/me/playlists")
+	if err != nil {
+		return nil, fmt.Errorf("build spotify user playlists endpoint: %w", err)
+	}
+
+	params := endpoint.Query()
+	params.Set("fields", "items(id,name),next")
+	params.Set("limit", "50")
+	endpoint.RawQuery = params.Encode()
+
+	var summaries []ports.PlaylistSummary
+	page := 0
+	for {
+		if page >= maxPages {
+			return nil, fmt.Errorf("ListUserPlaylists: exceeded max pagination pages (%d)", maxPages)
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+		if err != nil {
+			return nil, fmt.Errorf("create spotify user playlists request: %w", err)
+		}
+		a.setAuth(req)
+
+		resp, err := a.client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("request spotify user playlists: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			errBody, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("spotify list user playlists failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(errBody)))
+		}
+
+		var payload userPlaylistsResponse
+		decodeErr := json.NewDecoder(resp.Body).Decode(&payload)
+		_ = resp.Body.Close()
+		if decodeErr != nil {
+			return nil, fmt.Errorf("decode spotify user playlists response: %w", decodeErr)
+		}
+
+		for _, item := range payload.Items {
+			summaries = append(summaries, ports.PlaylistSummary{
+				ID:    item.ID,
+				Title: item.Name,
+			})
+		}
+
+		if payload.Next == nil || strings.TrimSpace(*payload.Next) == "" {
+			break
+		}
+
+		nextEndpoint, err := url.Parse(*payload.Next)
+		if err != nil {
+			return nil, fmt.Errorf("parse spotify user playlists next page url: %w", err)
+		}
+
+		if nextEndpoint.Host != baseURL.Host {
+			return nil, fmt.Errorf("ListUserPlaylists: next page url host %q does not match expected %q", nextEndpoint.Host, baseURL.Host)
+		}
+
+		endpoint = nextEndpoint
+		page++
+	}
+
+	return summaries, nil
+}
+
 func (a *Adapter) setAuth(req *http.Request) {
 	req.Header.Set("Authorization", "Bearer "+a.token)
 	req.Header.Set("Accept", "application/json")
@@ -325,4 +406,12 @@ type playlistTracksResponse struct {
 		} `json:"track"`
 	} `json:"items"`
 	Next *string `json:"next"` // pointer: JSON null → nil (absent), vs non-nil empty string (present but empty)
+}
+
+type userPlaylistsResponse struct {
+	Items []struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"items"`
+	Next *string `json:"next"`
 }

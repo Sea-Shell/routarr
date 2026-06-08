@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bateau84/yt2sp/internal/domain"
+	"github.com/bateau84/yt2sp/internal/ports"
 )
 
 func TestRunDrySkipsPreviouslyRejected(t *testing.T) {
@@ -389,6 +390,13 @@ func (s *youtubeServiceStub) GetPlaylistVideos(ctx context.Context, playlistID s
 	return s.videos, nil
 }
 
+func (s *youtubeServiceStub) ListUserPlaylists(ctx context.Context) ([]ports.PlaylistSummary, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return nil, nil
+}
+
 type spotifyServiceStub struct {
 	candidate              *domain.TrackMatch
 	err                    error
@@ -462,6 +470,13 @@ func (s *spotifyServiceStub) GetPlaylistTracks(ctx context.Context, playlistID s
 	tracks := make([]string, len(s.playlistTracks))
 	copy(tracks, s.playlistTracks)
 	return tracks, nil
+}
+
+func (s *spotifyServiceStub) ListUserPlaylists(ctx context.Context) ([]ports.PlaylistSummary, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return nil, nil
 }
 
 type matcherStub struct {
@@ -853,6 +868,13 @@ func (s *spotifyServiceStubMulti) GetPlaylistTracks(_ context.Context, _ string)
 
 func (s *spotifyServiceStubMulti) AddTrackToPlaylist(_ context.Context, _, _ string) error {
 	return nil
+}
+
+func (s *spotifyServiceStubMulti) ListUserPlaylists(_ context.Context) ([]ports.PlaylistSummary, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return nil, nil
 }
 
 // rankAwareMatcherStub scores by candidate title from a map.

@@ -6,8 +6,14 @@ import (
 	"github.com/bateau84/yt2sp/internal/domain"
 )
 
+type PlaylistSummary struct {
+	ID    string
+	Title string
+}
+
 type YouTubeService interface {
 	GetPlaylistVideos(ctx context.Context, playlistID string) ([]domain.TrackMatch, error)
+	ListUserPlaylists(ctx context.Context) ([]PlaylistSummary, error)
 }
 
 type SpotifyService interface {
@@ -17,4 +23,5 @@ type SpotifyService interface {
 	SearchTracks(ctx context.Context, query string, limit int) ([]domain.TrackMatchCandidate, error)
 	GetPlaylistTracks(ctx context.Context, playlistID string) ([]string, error)
 	AddTrackToPlaylist(ctx context.Context, playlistID, trackID string) error
+	ListUserPlaylists(ctx context.Context) ([]PlaylistSummary, error)
 }

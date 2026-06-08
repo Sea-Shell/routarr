@@ -17,6 +17,7 @@ import (
 const (
 	defaultBaseURL = "https://www.googleapis.com"
 	playlistPath   = "/youtube/v3/playlistItems"
+	playlistsPath  = "/youtube/v3/playlists"
 	videosPath     = "/youtube/v3/videos"
 )
 
@@ -218,6 +219,79 @@ func (a *Adapter) fetchVideoDetails(ctx context.Context, videoIDs []string) (map
 	return available, durations, nil
 }
 
+func (a *Adapter) fetchPlaylistsPage(ctx context.Context, pageToken string) (*playlistsResponse, error) {
+	endpoint, err := url.Parse(a.baseURL + playlistsPath)
+	if err != nil {
+		return nil, fmt.Errorf("build youtube playlists endpoint: %w", err)
+	}
+
+	query := endpoint.Query()
+	query.Set("part", "snippet")
+	query.Set("mine", "true")
+	query.Set("maxResults", strconv.Itoa(50))
+	if pageToken != "" {
+		query.Set("pageToken", pageToken)
+	}
+	endpoint.RawQuery = query.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("create youtube playlists request: %w", err)
+	}
+	a.setAuth(req)
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request youtube playlists: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("youtube playlists request failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var payload playlistsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode youtube playlists response: %w", err)
+	}
+
+	return &payload, nil
+}
+
+func (a *Adapter) ListUserPlaylists(ctx context.Context) ([]ports.PlaylistSummary, error) {
+	if a == nil || a.client == nil {
+		return nil, fmt.Errorf("youtube adapter is not initialized")
+	}
+	if a.token == "" {
+		return nil, fmt.Errorf("youtube oauth token is empty")
+	}
+
+	var summaries []ports.PlaylistSummary
+	pageToken := ""
+
+	for {
+		res, err := a.fetchPlaylistsPage(ctx, pageToken)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, item := range res.Items {
+			summaries = append(summaries, ports.PlaylistSummary{
+				ID:    item.ID,
+				Title: item.Snippet.Title,
+			})
+		}
+
+		if res.NextPageToken == "" {
+			break
+		}
+		pageToken = res.NextPageToken
+	}
+
+	return summaries, nil
+}
+
 func (a *Adapter) setAuth(req *http.Request) {
 	req.Header.Set("Authorization", "Bearer "+a.token)
 	req.Header.Set("Accept", "application/json")
@@ -253,5 +327,15 @@ type videosResponse struct {
 				Blocked []string `json:"blocked"`
 			} `json:"regionRestriction"` // TODO: use for region-based filtering in a future phase
 		} `json:"contentDetails"`
+	} `json:"items"`
+}
+
+type playlistsResponse struct {
+	NextPageToken string `json:"nextPageToken"`
+	Items         []struct {
+		ID      string `json:"id"`
+		Snippet struct {
+			Title string `json:"title"`
+		} `json:"snippet"`
 	} `json:"items"`
 }
