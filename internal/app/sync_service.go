@@ -42,13 +42,14 @@ type syncRunRepository interface {
 }
 
 type SyncService struct {
-	youtubeService  ports.YouTubeService
-	spotifyService  ports.SpotifyService
-	mappingRepo     ports.MappingRepository
-	matchRepo       ports.MatchRepository
-	candidateRepo   ports.CandidateRepository
-	matcher         Matcher
-	syncRunRepo     syncRunRepository
+	youtubeService   ports.YouTubeService
+	spotifyService   ports.SpotifyService
+	mappingRepo      ports.MappingRepository
+	matchRepo        ports.MatchRepository
+	candidateRepo    ports.CandidateRepository
+	matcher          Matcher
+	syncRunRepo      syncRunRepository
+	progressReporter ports.ProgressReporter
 }
 
 func NewSyncService(
@@ -88,6 +89,16 @@ type SyncServiceOption func(*SyncService)
 func WithCandidateRepository(repo ports.CandidateRepository) SyncServiceOption {
 	return func(s *SyncService) {
 		s.candidateRepo = repo
+	}
+}
+
+// WithProgressReporter attaches a ProgressReporter that receives structured
+// progress notifications during sync operations. If nil or not provided, no
+// progress is reported. Reporter is called fire-and-forget; errors are ignored
+// so that reporting failures cannot abort a sync.
+func WithProgressReporter(reporter ports.ProgressReporter) SyncServiceOption {
+	return func(s *SyncService) {
+		s.progressReporter = reporter
 	}
 }
 
