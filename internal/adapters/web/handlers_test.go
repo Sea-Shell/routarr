@@ -720,6 +720,235 @@ SELECT selected_spotify_track_id FROM sync_items WHERE sync_run_id = ? AND youtu
 	}
 }
 
+// TestSyncRunEvents returns JSON with event list, run status, pending count, and URLs.
+func TestSyncRunEvents(t *testing.T) {
+	t.Parallel()
+
+	db, _, mux := newTestHandler(t)
+
+	// Insert mapping + sync run.
+	_, err := db.ExecContext(t.Context(), `
+INSERT INTO playlist_mappings(youtube_playlist_id, youtube_playlist_title, spotify_playlist_id, spotify_playlist_title, created_at, updated_at)
+VALUES ('yt-ev-pl', 'EV Playlist', 'sp-ev-pl', 'EV SP Playlist', datetime('now'), datetime('now'))
+`)
+	if err != nil {
+		t.Fatalf("insert mapping: %v", err)
+	}
+
+	var mappingID int64
+	if err := db.QueryRowContext(t.Context(), `SELECT id FROM playlist_mappings WHERE youtube_playlist_id = 'yt-ev-pl'`).Scan(&mappingID); err != nil {
+		t.Fatalf("get mapping id: %v", err)
+	}
+
+	res, err := db.ExecContext(t.Context(), `
+INSERT INTO sync_runs(mapping_id, status, started_at) VALUES (?, 'completed', datetime('now'))
+`, mappingID)
+	if err != nil {
+		t.Fatalf("insert sync run: %v", err)
+	}
+	runID, _ := res.LastInsertId()
+
+	// Insert two events.
+	eventRepo := sqlite.NewSyncRunEventRepository(db)
+	ev1 := &domain.SyncRunEvent{RunID: int(runID), Level: "info", Message: "Started sync", Details: ""}
+	ev2 := &domain.SyncRunEvent{RunID: int(runID), Level: "info", Message: "Sync complete", Details: "2 tracks"}
+	if err := eventRepo.SaveSyncRunEvent(t.Context(), ev1); err != nil {
+		t.Fatalf("save event 1: %v", err)
+	}
+	if err := eventRepo.SaveSyncRunEvent(t.Context(), ev2); err != nil {
+		t.Fatalf("save event 2: %v", err)
+	}
+
+	resp := performRequest(t, mux, http.MethodGet, fmt.Sprintf("/runs/%d/events", runID), "", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /runs/%d/events status = %d, want %d; body: %s", runID, resp.StatusCode, http.StatusOK, readBody(t, resp))
+	}
+
+	ct := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("Content-Type = %q, want application/json prefix", ct)
+	}
+
+	body := readBody(t, resp)
+	var payload struct {
+		Run struct {
+			ID     int    `json:"id"`
+			Status string `json:"status"`
+		} `json:"run"`
+		Events []struct {
+			ID      int    `json:"id"`
+			Level   string `json:"level"`
+			Message string `json:"message"`
+			Details string `json:"details"`
+		} `json:"events"`
+		PendingCount int `json:"pending_count"`
+		URLs         struct {
+			Results string `json:"results"`
+			Review  string `json:"review"`
+			Routes  string `json:"routes"`
+		} `json:"urls"`
+	}
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v; body: %s", err, body)
+	}
+
+	if payload.Run.ID != int(runID) {
+		t.Errorf("run.id = %d, want %d", payload.Run.ID, int(runID))
+	}
+	if payload.Run.Status != "completed" {
+		t.Errorf("run.status = %q, want %q", payload.Run.Status, "completed")
+	}
+	if len(payload.Events) != 2 {
+		t.Fatalf("events len = %d, want 2", len(payload.Events))
+	}
+	if payload.Events[0].Message != "Started sync" {
+		t.Errorf("events[0].message = %q, want %q", payload.Events[0].Message, "Started sync")
+	}
+	if payload.Events[1].Message != "Sync complete" {
+		t.Errorf("events[1].message = %q, want %q", payload.Events[1].Message, "Sync complete")
+	}
+	if payload.Events[1].Details != "2 tracks" {
+		t.Errorf("events[1].details = %q, want %q", payload.Events[1].Details, "2 tracks")
+	}
+	// pending_count must be present (zero is fine — no track_matches in this run).
+	_ = payload.PendingCount
+	if payload.URLs.Results == "" {
+		t.Errorf("urls.results is empty")
+	}
+	if payload.URLs.Review == "" {
+		t.Errorf("urls.review is empty")
+	}
+	if payload.URLs.Routes == "" {
+		t.Errorf("urls.routes is empty")
+	}
+}
+
+// TestSyncRunEvents_NotFound returns 404 for nonexistent run.
+func TestSyncRunEvents_NotFound(t *testing.T) {
+	t.Parallel()
+
+	_, _, mux := newTestHandler(t)
+	resp := performRequest(t, mux, http.MethodGet, "/runs/9999/events", "", "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET /runs/9999/events status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+	readBody(t, resp) // drain
+}
+
+// TestSyncProgressPage renders progress page with terminal panel and poll URL.
+func TestSyncProgressPage(t *testing.T) {
+	t.Parallel()
+
+	db, _, mux := newTestHandler(t)
+
+	_, err := db.ExecContext(t.Context(), `
+INSERT INTO playlist_mappings(youtube_playlist_id, youtube_playlist_title, spotify_playlist_id, spotify_playlist_title, created_at, updated_at)
+VALUES ('yt-pg-pl', 'PG Playlist', 'sp-pg-pl', 'PG SP Playlist', datetime('now'), datetime('now'))
+`)
+	if err != nil {
+		t.Fatalf("insert mapping: %v", err)
+	}
+
+	var mappingID int64
+	if err := db.QueryRowContext(t.Context(), `SELECT id FROM playlist_mappings WHERE youtube_playlist_id = 'yt-pg-pl'`).Scan(&mappingID); err != nil {
+		t.Fatalf("get mapping id: %v", err)
+	}
+
+	res, err := db.ExecContext(t.Context(), `
+INSERT INTO sync_runs(mapping_id, status, started_at) VALUES (?, 'running', datetime('now'))
+`, mappingID)
+	if err != nil {
+		t.Fatalf("insert sync run: %v", err)
+	}
+	runID, _ := res.LastInsertId()
+
+	resp := performRequest(t, mux, http.MethodGet, fmt.Sprintf("/runs/%d/progress", runID), "", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /runs/%d/progress status = %d, want %d; body: %s", runID, resp.StatusCode, http.StatusOK, readBody(t, resp))
+	}
+
+	body := readBody(t, resp)
+	eventsURL := fmt.Sprintf("/runs/%d/events", runID)
+	if !strings.Contains(body, eventsURL) {
+		t.Errorf("progress page body missing events poll URL %q", eventsURL)
+	}
+	// Expect a log/terminal-style container in the page.
+	if !strings.Contains(body, "sync-log") && !strings.Contains(body, "progress") {
+		t.Errorf("progress page body missing terminal/log container marker; got: %q", body[:min(200, len(body))])
+	}
+}
+
+// TestSyncProgressPage_Completed shows action buttons when run is completed and pending items exist.
+func TestSyncProgressPage_Completed(t *testing.T) {
+	t.Parallel()
+
+	db, _, mux := newTestHandler(t)
+
+	_, err := db.ExecContext(t.Context(), `
+INSERT INTO playlist_mappings(youtube_playlist_id, youtube_playlist_title, spotify_playlist_id, spotify_playlist_title, created_at, updated_at)
+VALUES ('yt-cp-pl', 'CP Playlist', 'sp-cp-pl', 'CP SP Playlist', datetime('now'), datetime('now'))
+`)
+	if err != nil {
+		t.Fatalf("insert mapping: %v", err)
+	}
+
+	var mappingID int64
+	if err := db.QueryRowContext(t.Context(), `SELECT id FROM playlist_mappings WHERE youtube_playlist_id = 'yt-cp-pl'`).Scan(&mappingID); err != nil {
+		t.Fatalf("get mapping id: %v", err)
+	}
+
+	res, err := db.ExecContext(t.Context(), `
+INSERT INTO sync_runs(mapping_id, status, started_at) VALUES (?, 'completed', datetime('now'))
+`, mappingID)
+	if err != nil {
+		t.Fatalf("insert sync run: %v", err)
+	}
+	runID, _ := res.LastInsertId()
+
+	// Add a pending track match to trigger "Review Matches" button.
+	_, err = db.ExecContext(t.Context(), `
+INSERT INTO track_matches(youtube_video_id, youtube_title, spotify_track_id, spotify_track_title, spotify_artist, confidence, decision, decision_source)
+VALUES ('yt-cp-vid', 'CP Title', '', '', '', 0.5, 'pending', 'auto')
+`)
+	if err != nil {
+		t.Fatalf("insert track match: %v", err)
+	}
+	_, err = db.ExecContext(t.Context(), `
+INSERT INTO sync_items(sync_run_id, youtube_video_id, action) VALUES (?, 'yt-cp-vid', 'add')
+`, runID)
+	if err != nil {
+		t.Fatalf("insert sync item: %v", err)
+	}
+
+	resp := performRequest(t, mux, http.MethodGet, fmt.Sprintf("/runs/%d/progress", runID), "", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /runs/%d/progress status = %d, want %d; body: %s", runID, resp.StatusCode, http.StatusOK, readBody(t, resp))
+	}
+
+	body := readBody(t, resp)
+	if !strings.Contains(body, "View Results") {
+		t.Errorf("progress page body missing 'View Results' button; snippet: %q", body[:min(500, len(body))])
+	}
+	if !strings.Contains(body, "Review Matches") {
+		t.Errorf("progress page body missing 'Review Matches' button; snippet: %q", body[:min(500, len(body))])
+	}
+	if !strings.Contains(body, "Back to Routes") {
+		t.Errorf("progress page body missing 'Back to Routes' button; snippet: %q", body[:min(500, len(body))])
+	}
+}
+
+// TestSyncProgressPage_NotFound returns 404 for nonexistent run.
+func TestSyncProgressPage_NotFound(t *testing.T) {
+	t.Parallel()
+
+	_, _, mux := newTestHandler(t)
+	resp := performRequest(t, mux, http.MethodGet, "/runs/9999/progress", "", "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET /runs/9999/progress status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+	readBody(t, resp) // drain
+}
+
 // TestPickCandidate_InvalidMode verifies that an unrecognised mode returns 400.
 func TestPickCandidate_InvalidMode(t *testing.T) {
 	t.Parallel()

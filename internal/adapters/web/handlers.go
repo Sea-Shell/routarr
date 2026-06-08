@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"embed"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -40,6 +41,7 @@ type Handler struct {
 	mappingRepo   ports.MappingRepository
 	matchRepo     ports.MatchRepository
 	candidateRepo ports.CandidateRepository
+	eventRepo     ports.SyncRunEventRepository
 	syncService   syncCommitter
 	templates     map[string]*template.Template
 	oauthConfigs  map[string]*oauth2.Config
@@ -133,6 +135,39 @@ type matchReviewData struct {
 	Error string
 }
 
+// syncProgressData is the data passed to the sync_progress.gohtml template.
+type syncProgressData struct {
+	Run          syncRunView
+	PendingCount int
+}
+
+// syncProgressEventsResponse is the JSON payload returned by GET /runs/{id}/events.
+type syncProgressEventsResponse struct {
+	Run          syncProgressRunJSON   `json:"run"`
+	Events       []syncProgressEventJSON `json:"events"`
+	PendingCount int                   `json:"pending_count"`
+	URLs         syncProgressURLsJSON  `json:"urls"`
+}
+
+type syncProgressRunJSON struct {
+	ID     int    `json:"id"`
+	Status string `json:"status"`
+}
+
+type syncProgressEventJSON struct {
+	ID        int    `json:"id"`
+	CreatedAt string `json:"created_at"`
+	Level     string `json:"level"`
+	Message   string `json:"message"`
+	Details   string `json:"details"`
+}
+
+type syncProgressURLsJSON struct {
+	Results string `json:"results"`
+	Review  string `json:"review"`
+	Routes  string `json:"routes"`
+}
+
 func NewHandler(db *sql.DB, mappingRepo ports.MappingRepository, oauthBaseURL, ytClientID, ytSecret, spClientID, spSecret string, syncServices ...syncCommitter) (*Handler, error) {
 	if db == nil {
 		return nil, fmt.Errorf("web handler db is nil")
@@ -151,6 +186,7 @@ func NewHandler(db *sql.DB, mappingRepo ports.MappingRepository, oauthBaseURL, y
 		"mapping_form.gohtml",
 		"sync_detail.gohtml",
 		"match_review.gohtml",
+		"sync_progress.gohtml",
 	}
 	tmpls := make(map[string]*template.Template, len(pages))
 	for _, page := range pages {
@@ -166,6 +202,7 @@ func NewHandler(db *sql.DB, mappingRepo ports.MappingRepository, oauthBaseURL, y
 		mappingRepo:   mappingRepo,
 		matchRepo:     sqlite.NewMatchRepository(db),
 		candidateRepo: sqlite.NewCandidateRepository(db),
+		eventRepo:     sqlite.NewSyncRunEventRepository(db),
 		syncService:   syncService,
 		templates:     tmpls,
 		oauthConfigs: map[string]*oauth2.Config{
@@ -203,6 +240,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /mappings/{id}/sync", h.runDrySync)
 	mux.HandleFunc("POST /mappings/{id}/delete", h.deleteMapping)
 	mux.HandleFunc("GET /runs/{id}", h.syncDetail)
+	mux.HandleFunc("GET /runs/{id}/progress", h.syncProgress)
+	mux.HandleFunc("GET /runs/{id}/events", h.syncProgressEvents)
 	mux.HandleFunc("POST /runs/{id}/confirm", h.confirmRun)
 	mux.HandleFunc("GET /runs/{id}/review", h.matchReview)
 	mux.HandleFunc("POST /runs/{id}/review/{decision}", h.updateMatchDecision)
@@ -371,6 +410,98 @@ func (h *Handler) syncDetail(w http.ResponseWriter, r *http.Request) {
 		PendingCount: pendingCount,
 		Flash:        strings.TrimSpace(r.URL.Query().Get("flash")),
 	})
+}
+
+// syncProgress renders the progress page for a sync run.
+func (h *Handler) syncProgress(w http.ResponseWriter, r *http.Request) {
+	runID, ok := parsePathInt(r.PathValue("id"))
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	run, err := h.getSyncRun(r.Context(), runID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, fmt.Sprintf("load sync run: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	pendingCount, err := h.countPendingItems(r.Context(), runID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("count pending items: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	h.render(w, "sync_progress.gohtml", syncProgressData{
+		Run:          *run,
+		PendingCount: pendingCount,
+	})
+}
+
+// syncProgressEvents returns a JSON payload with run status, events, pending count, and action URLs.
+func (h *Handler) syncProgressEvents(w http.ResponseWriter, r *http.Request) {
+	runID, ok := parsePathInt(r.PathValue("id"))
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	run, err := h.getSyncRun(r.Context(), runID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, fmt.Sprintf("load sync run: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	events, err := h.eventRepo.ListSyncRunEvents(r.Context(), runID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("list sync run events: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	pendingCount, err := h.countPendingItems(r.Context(), runID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("count pending items: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	evJSON := make([]syncProgressEventJSON, len(events))
+	for i, ev := range events {
+		evJSON[i] = syncProgressEventJSON{
+			ID:        ev.ID,
+			CreatedAt: ev.CreatedAt.UTC().Format(time.RFC3339),
+			Level:     ev.Level,
+			Message:   ev.Message,
+			Details:   ev.Details,
+		}
+	}
+
+	resp := syncProgressEventsResponse{
+		Run: syncProgressRunJSON{
+			ID:     run.ID,
+			Status: run.Status,
+		},
+		Events:       evJSON,
+		PendingCount: pendingCount,
+		URLs: syncProgressURLsJSON{
+			Results: fmt.Sprintf("/runs/%d", runID),
+			Review:  fmt.Sprintf("/runs/%d/review", runID),
+			Routes:  "/",
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		// Header already set; log only.
+		_ = err
+	}
 }
 
 func (h *Handler) confirmRun(w http.ResponseWriter, r *http.Request) {
