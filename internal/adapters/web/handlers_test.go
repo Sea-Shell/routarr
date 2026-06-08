@@ -1124,6 +1124,11 @@ VALUES ('yt-bg-1', 'BG Track', 'sp-bg-1', 'BG Spotify', 'BG Artist', 0.9, 'auto'
 	}
 
 	h := newTestHandlerWithAsyncRunner(t, db, stub)
+
+	// Install deterministic completion hook: closed after all DB writes finish.
+	jobDone := make(chan int, 1)
+	h.asyncJobDone = func(runID int) { jobDone <- runID }
+
 	mux2 := http.NewServeMux()
 	h.RegisterRoutes(mux2)
 
@@ -1136,15 +1141,12 @@ VALUES ('yt-bg-1', 'BG Track', 'sp-bg-1', 'BG Spotify', 'BG Artist', 0.9, 'auto'
 	}
 	readBody(t, resp) // drain
 
-	// Wait for background goroutine to finish.
+	// Wait for background goroutine to finish (all DB writes attempted).
 	select {
-	case <-done:
+	case <-jobDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for background job")
 	}
-
-	// Give the goroutine time to persist final state.
-	time.Sleep(50 * time.Millisecond)
 
 	// The run should be marked completed or failed (not running anymore).
 	var runStatus string
@@ -1197,6 +1199,11 @@ VALUES ('yt-async-3', 'Async YT 3', 'sp-async-3', 'Async SP 3', datetime('now'),
 	}
 
 	h := newTestHandlerWithAsyncRunner(t, db, stub)
+
+	// Install deterministic completion hook.
+	jobDone := make(chan int, 1)
+	h.asyncJobDone = func(runID int) { jobDone <- runID }
+
 	mux2 := http.NewServeMux()
 	h.RegisterRoutes(mux2)
 
@@ -1210,13 +1217,10 @@ VALUES ('yt-async-3', 'Async YT 3', 'sp-async-3', 'Async SP 3', datetime('now'),
 	readBody(t, resp)
 
 	select {
-	case <-done:
+	case <-jobDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for background job")
 	}
-
-	// Give the goroutine time to persist final state before reading it back.
-	time.Sleep(50 * time.Millisecond)
 
 	var runStatus string
 	err = db.QueryRowContext(t.Context(), `SELECT status FROM sync_runs WHERE mapping_id = ?`, mappingID).Scan(&runStatus)

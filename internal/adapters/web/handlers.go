@@ -55,6 +55,10 @@ type Handler struct {
 	// asyncRunner performs the background dry sync. Set in production by
 	// buildAsyncRunner; overridable in tests.
 	asyncRunner asyncDryRunner
+	// asyncJobDone is an optional test hook invoked (with defer) at the very
+	// end of the background goroutine, after all DB writes are attempted.
+	// It is nil in production and must never block the caller.
+	asyncJobDone  func(runID int)
 	templates     map[string]*template.Template
 	oauthConfigs  map[string]*oauth2.Config
 	oauthTokenExchanger func(ctx context.Context, conf *oauth2.Config, code string) (*oauth2.Token, error)
@@ -679,8 +683,14 @@ VALUES (?, ?, datetime('now'))
 	// Add a 30-minute cap to prevent runaway background jobs.
 	bgCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Minute)
 
+	// Capture hook locally so the goroutine closure doesn't race on h.asyncJobDone.
+	jobDone := h.asyncJobDone
+
 	go func() {
 		defer cancel()
+		if jobDone != nil {
+			defer jobDone(runID)
+		}
 
 		matches, dryErr := runner.RunDryInto(bgCtx, run, mappingID)
 		if dryErr != nil {
