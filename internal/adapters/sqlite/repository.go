@@ -13,6 +13,7 @@ import (
 
 var _ ports.MappingRepository = (*MappingRepository)(nil)
 var _ ports.MatchRepository = (*MatchRepository)(nil)
+var _ ports.CandidateRepository = (*CandidateRepository)(nil)
 
 type MappingRepository struct {
 	db *sql.DB
@@ -367,7 +368,7 @@ func (r *MatchRepository) GetMatch(ctx context.Context, ytVideoID string) (*doma
 	}
 
 	row := r.db.QueryRowContext(ctx, `
-SELECT youtube_video_id, youtube_title, spotify_track_id, spotify_track_title, spotify_artist, confidence, decision
+SELECT youtube_video_id, youtube_title, spotify_track_id, spotify_track_title, spotify_artist, confidence, decision, COALESCE(decision_source, '')
 FROM track_matches
 WHERE youtube_video_id = ?
 `, ytVideoID)
@@ -386,6 +387,7 @@ WHERE youtube_video_id = ?
 		&spArtist,
 		&match.Confidence,
 		&decision,
+		&match.DecisionSource,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -402,10 +404,159 @@ WHERE youtube_video_id = ?
 	return &match, nil
 }
 
+// UpdateMatchChoice persists a user-selected Spotify track as a global manual decision.
+func (r *MatchRepository) UpdateMatchChoice(ctx context.Context, ytVideoID, spTrackID, spTitle, spArtist string, decision domain.MatchDecision) error {
+	if r == nil || r.db == nil {
+		return fmt.Errorf("match repository is not initialized")
+	}
+
+	res, err := r.db.ExecContext(ctx, `
+UPDATE track_matches
+SET spotify_track_id    = ?,
+    spotify_track_title = ?,
+    spotify_artist      = ?,
+    decision            = ?,
+    decision_source     = 'user'
+WHERE youtube_video_id = ?
+`,
+		nullableString(spTrackID),
+		nullableString(spTitle),
+		nullableString(spArtist),
+		string(decision),
+		ytVideoID,
+	)
+	if err != nil {
+		return fmt.Errorf("update match choice: %w", err)
+	}
+
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update match choice affected rows: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("track match for video %q not found", ytVideoID)
+	}
+
+	return nil
+}
+
 func nullableString(v string) any {
 	if v == "" {
 		return nil
 	}
 
 	return v
+}
+
+// CandidateRepository persists Spotify search candidates per sync run.
+type CandidateRepository struct {
+	db *sql.DB
+}
+
+func NewCandidateRepository(db *sql.DB) *CandidateRepository {
+	return &CandidateRepository{db: db}
+}
+
+func (r *CandidateRepository) SaveCandidates(ctx context.Context, candidates []domain.TrackMatchCandidate) error {
+	if r == nil || r.db == nil {
+		return fmt.Errorf("candidate repository is not initialized")
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin save candidates tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Delete existing candidates for this run+video to allow idempotent re-saves.
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM track_match_candidates
+WHERE sync_run_id = ? AND youtube_video_id = ?
+`, candidates[0].SyncRunID, candidates[0].YTVideoID); err != nil {
+		return fmt.Errorf("delete existing candidates: %w", err)
+	}
+
+	for _, c := range candidates {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO track_match_candidates(sync_run_id, youtube_video_id, spotify_track_id, spotify_title, spotify_artist, confidence, rank)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+`, c.SyncRunID, c.YTVideoID, c.SPTrackID, c.SPTitle, c.SPArtist, c.Confidence, c.Rank); err != nil {
+			return fmt.Errorf("insert candidate rank %d: %w", c.Rank, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit save candidates: %w", err)
+	}
+
+	return nil
+}
+
+func (r *CandidateRepository) GetCandidates(ctx context.Context, syncRunID int, ytVideoID string) ([]domain.TrackMatchCandidate, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("candidate repository is not initialized")
+	}
+
+	rows, err := r.db.QueryContext(ctx, `
+SELECT sync_run_id, youtube_video_id, spotify_track_id, spotify_title, spotify_artist, confidence, rank
+FROM track_match_candidates
+WHERE sync_run_id = ? AND youtube_video_id = ?
+ORDER BY rank ASC
+`, syncRunID, ytVideoID)
+	if err != nil {
+		return nil, fmt.Errorf("query candidates: %w", err)
+	}
+	defer rows.Close()
+
+	var candidates []domain.TrackMatchCandidate
+	for rows.Next() {
+		var c domain.TrackMatchCandidate
+		if err := rows.Scan(&c.SyncRunID, &c.YTVideoID, &c.SPTrackID, &c.SPTitle, &c.SPArtist, &c.Confidence, &c.Rank); err != nil {
+			return nil, fmt.Errorf("scan candidate: %w", err)
+		}
+		candidates = append(candidates, c)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate candidates: %w", err)
+	}
+
+	return candidates, nil
+}
+
+// GetCandidatesByRun loads all candidates for a sync run in a single query and
+// groups them by YTVideoID. This avoids N+1 queries when building review pages.
+func (r *CandidateRepository) GetCandidatesByRun(ctx context.Context, syncRunID int) (map[string][]domain.TrackMatchCandidate, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("candidate repository is not initialized")
+	}
+
+	rows, err := r.db.QueryContext(ctx, `
+SELECT sync_run_id, youtube_video_id, spotify_track_id, spotify_title, spotify_artist, confidence, rank
+FROM track_match_candidates
+WHERE sync_run_id = ?
+ORDER BY youtube_video_id, rank ASC
+`, syncRunID)
+	if err != nil {
+		return nil, fmt.Errorf("query candidates by run: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string][]domain.TrackMatchCandidate)
+	for rows.Next() {
+		var c domain.TrackMatchCandidate
+		if err := rows.Scan(&c.SyncRunID, &c.YTVideoID, &c.SPTrackID, &c.SPTitle, &c.SPArtist, &c.Confidence, &c.Rank); err != nil {
+			return nil, fmt.Errorf("scan candidate: %w", err)
+		}
+		result[c.YTVideoID] = append(result[c.YTVideoID], c)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate candidates by run: %w", err)
+	}
+
+	return result, nil
 }

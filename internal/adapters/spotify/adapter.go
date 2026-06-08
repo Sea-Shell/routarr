@@ -102,6 +102,73 @@ func (a *Adapter) SearchTrack(ctx context.Context, query string) (*domain.TrackM
 	}, nil
 }
 
+func (a *Adapter) SearchTracks(ctx context.Context, query string, limit int) ([]domain.TrackMatchCandidate, error) {
+	if a == nil || a.client == nil {
+		return nil, fmt.Errorf("spotify adapter is not initialized")
+	}
+	if a.token == "" {
+		return nil, fmt.Errorf("spotify oauth token is empty")
+	}
+	if strings.TrimSpace(query) == "" {
+		return nil, fmt.Errorf("query is empty")
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+	if limit > 50 {
+		limit = 50
+	}
+
+	endpoint, err := url.Parse(a.baseURL + "/v1/search")
+	if err != nil {
+		return nil, fmt.Errorf("build spotify search endpoint: %w", err)
+	}
+
+	params := endpoint.Query()
+	params.Set("q", query)
+	params.Set("type", "track")
+	params.Set("limit", fmt.Sprintf("%d", limit))
+	endpoint.RawQuery = params.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("create spotify search request: %w", err)
+	}
+	a.setAuth(req)
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request spotify search: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("spotify search failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var payload searchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode spotify search response: %w", err)
+	}
+
+	candidates := make([]domain.TrackMatchCandidate, 0, len(payload.Tracks.Items))
+	for i, item := range payload.Tracks.Items {
+		artist := ""
+		if len(item.Artists) > 0 {
+			artist = item.Artists[0].Name
+		}
+		candidates = append(candidates, domain.TrackMatchCandidate{
+			SPTrackID: item.ID,
+			SPTitle:   item.Name,
+			SPArtist:  artist,
+			Rank:      i + 1,
+		})
+	}
+
+	return candidates, nil
+}
+
 func (a *Adapter) GetPlaylistTracks(ctx context.Context, playlistID string) ([]string, error) {
 	if a == nil || a.client == nil {
 		return nil, fmt.Errorf("spotify adapter is not initialized")

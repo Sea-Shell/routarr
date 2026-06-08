@@ -91,6 +91,92 @@
         line-height: 1.5;
     }
 
+    .compare-link {
+        font-size: 0.73rem;
+        color: var(--green);
+        text-decoration: none;
+        display: inline-block;
+        margin-top: 0.3rem;
+    }
+    .compare-link:hover { text-decoration: underline; }
+
+    /* ── Prior choice badge ──────────────────────────────────── */
+    .badge-prior {
+        display: inline-block;
+        background: var(--amber);
+        color: var(--bg);
+        font-size: 0.65rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        padding: 0.15rem 0.45rem;
+        border-radius: 2px;
+        margin-left: 0.5rem;
+    }
+
+    /* ── Alternatives section ────────────────────────────────── */
+    .alternatives-toggle {
+        font-size: 0.76rem;
+        color: var(--green);
+        cursor: pointer;
+        border: none;
+        background: none;
+        padding: 0.5rem 1.25rem;
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+        border-top: 1px solid var(--border);
+        width: 100%;
+        text-align: left;
+    }
+    .alternatives-toggle:hover { text-decoration: underline; }
+
+    .alternatives-list {
+        border-top: 1px solid var(--border);
+        padding: 0.5rem 1.25rem 0.75rem;
+    }
+
+    .alternative-row {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.45rem 0;
+        border-bottom: 1px solid rgba(255,255,255,0.04);
+        font-size: 0.82rem;
+    }
+    .alternative-row:last-child { border-bottom: none; }
+
+    .alt-rank {
+        font-size: 0.7rem;
+        color: var(--muted);
+        min-width: 1.2rem;
+        text-align: center;
+    }
+
+    .alt-info {
+        flex: 1;
+        min-width: 0;
+    }
+
+    .alt-title {
+        font-weight: 600;
+        color: var(--text);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .alt-meta {
+        font-size: 0.72rem;
+        color: var(--muted);
+    }
+
+    .alt-actions {
+        display: flex;
+        gap: 0.4rem;
+        flex-shrink: 0;
+    }
+
     /* ── Decision row ────────────────────────────────────────── */
     .decision-row {
         display: flex;
@@ -129,6 +215,20 @@
         text-decoration: none;
     }
 
+    /* Use once / Remember: ghost variants */
+    .btn-use-once {
+        font-size: 0.72rem;
+        padding: 0.25rem 0.55rem;
+    }
+
+    .btn-remember {
+        font-size: 0.72rem;
+        padding: 0.25rem 0.55rem;
+        color: var(--amber);
+        border-color: var(--amber);
+    }
+    .btn-remember:hover { background: var(--amber); color: var(--bg); }
+
     @media (max-width: 580px) {
         .compare-grid { grid-template-columns: 1fr; }
         .compare-side + .compare-side {
@@ -161,7 +261,10 @@
 
         <!-- ── Card header: index + confidence ───────────────── -->
         <div class="review-card-header">
-            <span>Uncertain Match</span>
+            <span>
+                Uncertain Match
+                {{if .IsPriorChoice}}<span class="badge-prior">Using previous choice</span>{{end}}
+            </span>
             <span class="review-card-conf">
                 Confidence:&nbsp;
                 {{if ge .Confidence 0.8}}
@@ -185,6 +288,11 @@
                 </div>
                 <div class="compare-title">{{.YouTubeTitle}}</div>
                 <div class="compare-meta">{{.YouTubeVideoID}}</div>
+                {{if .YouTubeURL}}
+                <a class="compare-link" href="{{.YouTubeURL}}" target="_blank" rel="noopener">
+                    ▶ Watch on YouTube ↗
+                </a>
+                {{end}}
             </div>
 
             <!-- Spotify candidate -->
@@ -199,12 +307,71 @@
                     {{if .SpotifyArtist}}{{.SpotifyArtist}}<br />{{end}}
                     {{.SpotifyTrackID}}
                 </div>
+                {{if .SpotifyURL}}
+                <a class="compare-link" href="{{.SpotifyURL}}" target="_blank" rel="noopener">
+                    ♫ Open on Spotify ↗
+                </a>
+                {{end}}
                 {{else}}
                 <div class="compare-meta" style="color:var(--muted);">No candidate found</div>
                 {{end}}
             </div>
 
         </div>
+
+        <!-- ── Alternatives (expandable) ─────────────────────── -->
+        {{if .Candidates}}
+        {{$id := .YouTubeVideoID}}
+        {{$expanded := not .IsAutoMatch}}
+        <button
+            class="alternatives-toggle"
+            data-video-id="{{$id}}"
+            id="alt-toggle-{{$id}}"
+            aria-expanded="{{if $expanded}}true{{else}}false{{end}}"
+            aria-controls="alt-list-{{$id}}">
+            <span id="alt-chevron-{{$id}}">{{if $expanded}}▾{{else}}▸{{end}}</span>
+            {{len .Candidates}} alternative{{if gt (len .Candidates) 1}}s{{end}}
+        </button>
+        <div class="alternatives-list" id="alt-list-{{$id}}"{{if not $expanded}} style="display:none;"{{end}}>
+            {{range .Candidates}}
+            <div class="alternative-row">
+                <span class="alt-rank">#{{.Rank}}</span>
+                <div class="alt-info">
+                    <div class="alt-title">{{.SPTitle}}</div>
+                    <div class="alt-meta">
+                        {{if .SPArtist}}{{.SPArtist}} · {{end}}
+                        {{if .SpotifyURL}}<a class="compare-link" href="{{.SpotifyURL}}" target="_blank" rel="noopener">Spotify ↗</a>{{else}}{{.SPTrackID}}{{end}}
+                        <span style="margin-left:0.4rem;">
+                            {{if ge .Confidence 0.8}}<span class="conf-high">{{printf "%.2f" .Confidence}}</span>
+                            {{else if ge .Confidence 0.4}}<span class="conf-mid">{{printf "%.2f" .Confidence}}</span>
+                            {{else}}<span class="conf-low">{{printf "%.2f" .Confidence}}</span>{{end}}
+                        </span>
+                    </div>
+                </div>
+                <div class="alt-actions">
+                    <!-- Use once: updates this run's match but does not persist globally -->
+                    <form method="post" action="/runs/{{$.RunID}}/review/pick">
+                        <input type="hidden" name="youtube_video_id" value="{{$id}}" />
+                        <input type="hidden" name="spotify_track_id" value="{{.SPTrackID}}" />
+                        <input type="hidden" name="spotify_title" value="{{.SPTitle}}" />
+                        <input type="hidden" name="spotify_artist" value="{{.SPArtist}}" />
+                        <input type="hidden" name="mode" value="once" />
+                        <button class="btn btn-ghost btn-use-once" type="submit">Use once</button>
+                    </form>
+                    <!-- Remember: persists as global manual decision for future dry runs -->
+                    <form method="post" action="/runs/{{$.RunID}}/review/pick">
+                        <input type="hidden" name="youtube_video_id" value="{{$id}}" />
+                        <input type="hidden" name="spotify_track_id" value="{{.SPTrackID}}" />
+                        <input type="hidden" name="spotify_title" value="{{.SPTitle}}" />
+                        <input type="hidden" name="spotify_artist" value="{{.SPArtist}}" />
+                        <input type="hidden" name="mode" value="remember" />
+                        <button class="btn btn-remember" type="submit">Remember</button>
+                    </form>
+                </div>
+            </div>
+            {{end}}
+        </div>
+        {{end}}
 
         <!-- ── Decision buttons ───────────────────────────────── -->
         <div class="decision-row">
@@ -232,4 +399,19 @@
     </p>
 </div>
 {{end}}
+
+<script>
+document.addEventListener('click', function(e) {
+    var btn = e.target.closest('[data-video-id]');
+    if (!btn) return;
+    var videoID = btn.getAttribute('data-video-id');
+    var list = document.getElementById('alt-list-' + videoID);
+    var chevron = document.getElementById('alt-chevron-' + videoID);
+    if (!list) return;
+    var expanded = btn.getAttribute('aria-expanded') === 'true';
+    list.style.display = expanded ? 'none' : 'block';
+    btn.setAttribute('aria-expanded', String(!expanded));
+    if (chevron) chevron.textContent = expanded ? '▸' : '▾';
+});
+</script>
 {{end}}
