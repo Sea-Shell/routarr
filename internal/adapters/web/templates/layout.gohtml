@@ -229,7 +229,8 @@
 
         input[type="text"],
         input:not([type]),
-        input[type="hidden"] ~ input {
+        input[type="hidden"] ~ input,
+        select {
             width: 100%;
             max-width: 520px;
             padding: 0.5rem 0.75rem;
@@ -239,10 +240,22 @@
             color: var(--text);
             font-family: inherit;
             font-size: 0.9rem;
+            appearance: none;
+            -webkit-appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%2388a393'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 0.75rem center;
+            padding-right: 2rem;
+        }
+
+        select option {
+            background: var(--panel-bg);
+            color: var(--text);
         }
 
         input[type="text"]:focus,
-        input:not([type]):focus { outline: none; border-color: var(--green); }
+        input:not([type]):focus,
+        select:focus { outline: none; border-color: var(--green); }
 
         /* ── Utility ─────────────────────────────────────────────── */
         .actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
