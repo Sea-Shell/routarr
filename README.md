@@ -8,6 +8,7 @@ Runs as an HTTP server, authenticates via OAuth, and persists everything in a lo
 ## Table of contents
 
 - [Quick start](#quick-start)
+- [How it works](#how-it-works)
 - [OAuth setup — Spotify](#oauth-setup--spotify)
 - [OAuth setup — YouTube](#oauth-setup--youtube)
 - [Environment variables](#environment-variables)
@@ -37,6 +38,16 @@ make run
 ```
 
 Open `http://localhost:8080` in your browser.
+
+---
+
+## How it works
+
+1. **Connect** — visit the dashboard and connect your YouTube and Spotify accounts via OAuth. Tokens are stored in the local SQLite database and refreshed automatically.
+2. **Create a mapping** — click **+ New Mapping**. Pick source and destination playlists from the dropdowns (populated from your accounts) or enter IDs manually. A display label is auto-filled from the playlist name and can be overridden.
+3. **Dry sync** — click **Sync** on a mapping. The app fetches all YouTube videos, searches Spotify for each track, and scores matches using an F1 title matcher. Nothing is written to Spotify yet.
+4. **Review** — tracks scoring above 0.8 are auto-approved; below 0.4 are rejected; everything in between is queued for manual review. The review UI lets you pick from up to five Spotify candidates per track, or reject it.
+5. **Commit** — once satisfied with the matches, click **Commit**. Approved tracks are added to the Spotify destination playlist.
 
 ---
 
@@ -235,8 +246,9 @@ internal/domain/             — pure value types (PlaylistMapping, SyncRun, Tra
 internal/ports/              — interfaces: MappingRepository, MatchRepository, YouTubeService, SpotifyService
 internal/app/sync_service.go — orchestrates a sync run; no HTTP, no DB calls directly
 internal/matcher/            — F1-score title matcher (score > 0.8 = auto, < 0.4 = rejected, else pending)
-internal/adapters/sqlite/    — implements ports + manages migrations
-internal/adapters/youtube/   — calls YouTube Data API v3
-internal/adapters/spotify/   — calls Spotify Web API
-internal/adapters/web/       — HTTP handlers + HTML templates (embedded via go:embed)
+internal/adapters/sqlite/    — implements ports; manages migrations, OAuth token storage, sync run events, track match candidates
+internal/adapters/youtube/   — calls YouTube Data API v3; lists user playlists + fetches playlist videos
+internal/adapters/spotify/   — calls Spotify Web API; lists user playlists, searches tracks, adds to playlist
+internal/adapters/web/       — HTTP handlers + HTML templates (embedded via go:embed); OAuth flow, mapping CRUD, sync UI
+internal/tlsutil/            — self-signed TLS certificate generation for local HTTPS development
 ```
