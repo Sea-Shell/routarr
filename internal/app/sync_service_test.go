@@ -876,3 +876,44 @@ func (m *rankAwareMatcherStub) Classify(_ float64) domain.MatchDecision {
 	}
 	return domain.MatchPending
 }
+
+// fakeProgressReporter is a test double for ports.ProgressReporter.
+type fakeProgressReporter struct {
+	calls []progressReportCall
+}
+
+type progressReportCall struct {
+	runID   int
+	level   string
+	message string
+}
+
+func (f *fakeProgressReporter) Report(_ context.Context, runID int, level, message string) {
+	f.calls = append(f.calls, progressReportCall{runID: runID, level: level, message: message})
+}
+
+// TestWithProgressReporterWiresReporter verifies that WithProgressReporter
+// stores the reporter on the SyncService so it is available for use later.
+func TestWithProgressReporterWiresReporter(t *testing.T) {
+	t.Parallel()
+
+	mapping := &domain.PlaylistMapping{ID: 1, YTPlaylistID: "yt-playlist"}
+	mappingRepo := &mappingRepoStub{mapping: mapping}
+	matchRepo := &matchRepoStub{}
+	yt := &youtubeServiceStub{}
+	sp := &spotifyServiceStub{}
+	matcher := &matcherStub{}
+
+	reporter := &fakeProgressReporter{}
+
+	svc := NewSyncService(yt, sp, mappingRepo, matchRepo, matcher,
+		WithProgressReporter(reporter),
+	)
+
+	if svc.progressReporter == nil {
+		t.Fatal("expected progressReporter to be set, got nil")
+	}
+	if svc.progressReporter != reporter {
+		t.Fatal("expected progressReporter to be the supplied reporter instance")
+	}
+}
