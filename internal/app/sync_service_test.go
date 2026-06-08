@@ -892,6 +892,125 @@ func (f *fakeProgressReporter) Report(_ context.Context, runID int, level, messa
 	f.calls = append(f.calls, progressReportCall{runID: runID, level: level, message: message})
 }
 
+// TestRunDryReportsProgressEvents verifies that RunDry emits the expected
+// ordered progress events when a reporter is wired and the run succeeds.
+func TestRunDryReportsProgressEvents(t *testing.T) {
+	t.Parallel()
+
+	mapping := &domain.PlaylistMapping{ID: 50, YTPlaylistID: "yt-playlist"}
+	videos := []domain.TrackMatch{
+		{YTVideoID: "vid-a", YTTitle: "Artist A - Track A"},
+		{YTVideoID: "vid-b", YTTitle: "Artist B - Track B"},
+	}
+	candidate := &domain.TrackMatch{SPTrackID: "sp-1", SPTitle: "Track A", SPArtist: "Artist A"}
+
+	mappingRepo := &mappingRepoStub{mapping: mapping}
+	matchRepo := &matchRepoStub{existing: map[string]*domain.TrackMatch{}}
+	yt := &youtubeServiceStub{videos: videos}
+	sp := &spotifyServiceStub{candidate: candidate}
+	matcher := &matcherStub{score: 0.91, decision: domain.MatchAuto}
+	reporter := &fakeProgressReporter{}
+
+	svc := NewSyncService(yt, sp, mappingRepo, matchRepo, matcher,
+		WithProgressReporter(reporter),
+	)
+
+	run, _, err := svc.RunDry(context.Background(), mapping.ID)
+	if err != nil {
+		t.Fatalf("RunDry() error = %v", err)
+	}
+	if run == nil {
+		t.Fatalf("RunDry() run is nil")
+	}
+
+	// All events must carry the saved run ID.
+	for i, call := range reporter.calls {
+		if call.runID != run.ID {
+			t.Errorf("event[%d] runID = %d, want %d", i, call.runID, run.ID)
+		}
+	}
+
+	// Verify minimum required events in order.
+	type wantEvent struct {
+		level   string
+		message string
+	}
+	want := []wantEvent{
+		{"info", "Created dry sync run"},
+		{"info", "Fetching YouTube playlist"},
+		{"info", "Fetched 2 YouTube videos"},
+		{"info", "Matching video 1/2: Artist A - Track A"},
+		{"info", "Matching video 2/2: Artist B - Track B"},
+		{"success", "Finished matching"},
+	}
+
+	if len(reporter.calls) < len(want) {
+		t.Fatalf("got %d progress events, want at least %d; events: %+v", len(reporter.calls), len(want), reporter.calls)
+	}
+
+	// Build an ordered sequence for exact-order check.
+	got := make([]wantEvent, len(reporter.calls))
+	for i, c := range reporter.calls {
+		got[i] = wantEvent{c.level, c.message}
+	}
+
+	// Check that want events appear as a subsequence (in order) within got.
+	wi := 0
+	for _, g := range got {
+		if wi < len(want) && g == want[wi] {
+			wi++
+		}
+	}
+	if wi != len(want) {
+		t.Errorf("expected progress events not found as ordered subsequence.\nwant: %+v\ngot:  %+v", want, got)
+	}
+}
+
+// TestRunDryReportsFetchError verifies that when YouTube playlist fetch fails
+// after the run is created, an error-level event is emitted with the run ID.
+func TestRunDryReportsFetchError(t *testing.T) {
+	t.Parallel()
+
+	mapping := &domain.PlaylistMapping{ID: 51, YTPlaylistID: "yt-error-playlist"}
+	fetchErr := errors.New("network timeout")
+
+	mappingRepo := &mappingRepoStub{mapping: mapping}
+	matchRepo := &matchRepoStub{}
+	yt := &youtubeServiceStub{err: fetchErr}
+	sp := &spotifyServiceStub{}
+	matcher := &matcherStub{}
+	reporter := &fakeProgressReporter{}
+
+	svc := NewSyncService(yt, sp, mappingRepo, matchRepo, matcher,
+		WithProgressReporter(reporter),
+	)
+
+	run, _, err := svc.RunDry(context.Background(), mapping.ID)
+	if err == nil {
+		t.Fatal("RunDry() expected error, got nil")
+	}
+	// run may be returned even on error (run was created before fetch)
+	_ = run
+
+	// Must have at least one error-level event.
+	var errEvents []progressReportCall
+	for _, c := range reporter.calls {
+		if c.level == "error" {
+			errEvents = append(errEvents, c)
+		}
+	}
+	if len(errEvents) == 0 {
+		t.Fatalf("expected at least one error-level progress event, got none; all events: %+v", reporter.calls)
+	}
+
+	// The error event must have a valid run ID (> 0 since run was created).
+	for _, e := range errEvents {
+		if e.runID <= 0 {
+			t.Errorf("error event runID = %d, want > 0", e.runID)
+		}
+	}
+}
+
 // TestWithProgressReporterWiresReporter verifies that WithProgressReporter
 // stores the reporter on the SyncService so it is available for use later.
 func TestWithProgressReporterWiresReporter(t *testing.T) {
