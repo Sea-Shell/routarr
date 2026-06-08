@@ -229,6 +229,58 @@
     }
     .btn-remember:hover { background: var(--amber); color: var(--bg); }
 
+    /* ── Compact resolved card ───────────────────────────────── */
+    .review-card-compact {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.55rem 1rem;
+        font-size: 0.83rem;
+        flex-wrap: wrap;
+    }
+
+    .badge-approved {
+        display: inline-block;
+        background: var(--green);
+        color: var(--bg);
+        font-size: 0.65rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        padding: 0.15rem 0.45rem;
+        border-radius: 2px;
+        flex-shrink: 0;
+    }
+
+    .badge-rejected {
+        display: inline-block;
+        background: var(--red);
+        color: #fff;
+        font-size: 0.65rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        padding: 0.15rem 0.45rem;
+        border-radius: 2px;
+        flex-shrink: 0;
+    }
+
+    .compact-title {
+        flex: 1;
+        min-width: 0;
+        color: var(--muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .btn-change {
+        font-size: 0.72rem;
+        padding: 0.2rem 0.5rem;
+        flex-shrink: 0;
+        cursor: pointer;
+    }
+
     @media (max-width: 580px) {
         .compare-grid { grid-template-columns: 1fr; }
         .compare-side + .compare-side {
@@ -257,7 +309,26 @@
 
 {{if .Items}}
     {{range .Items}}
-    <div class="review-card">
+    <div class="review-card" id="match-{{.YouTubeVideoID}}">
+
+        {{if .IsResolved}}
+        <!-- ── Compact resolved view (default) ───────────────── -->
+        <div class="review-card-compact" id="match-compact-{{.YouTubeVideoID}}">
+            {{if .IsApproved}}
+            <span class="badge-approved">Approved</span>
+            {{else}}
+            <span class="badge-rejected">Rejected</span>
+            {{end}}
+            <span class="compact-title">{{.YouTubeTitle}}</span>
+            <button
+                class="btn btn-ghost btn-change"
+                data-change-id="{{.YouTubeVideoID}}"
+                type="button">Change</button>
+        </div>
+
+        <!-- ── Full card content (hidden until Change clicked) ── -->
+        <div id="match-full-{{.YouTubeVideoID}}" style="display:none;">
+        {{end}}
 
         <!-- ── Card header: index + confidence ───────────────── -->
         <div class="review-card-header">
@@ -388,6 +459,7 @@
             </span>
         </div>
 
+        {{if .IsResolved}}</div>{{end}}
     </div>
     {{end}}
 {{else}}
@@ -402,16 +474,30 @@
 
 <script>
 document.addEventListener('click', function(e) {
-    var btn = e.target.closest('[data-video-id]');
-    if (!btn) return;
-    var videoID = btn.getAttribute('data-video-id');
-    var list = document.getElementById('alt-list-' + videoID);
-    var chevron = document.getElementById('alt-chevron-' + videoID);
-    if (!list) return;
-    var expanded = btn.getAttribute('aria-expanded') === 'true';
-    list.style.display = expanded ? 'none' : 'block';
-    btn.setAttribute('aria-expanded', String(!expanded));
-    if (chevron) chevron.textContent = expanded ? '▸' : '▾';
+    // ── Alternatives toggle ───────────────────────────────────
+    var altBtn = e.target.closest('[data-video-id]');
+    if (altBtn) {
+        var videoID = altBtn.getAttribute('data-video-id');
+        var list = document.getElementById('alt-list-' + videoID);
+        var chevron = document.getElementById('alt-chevron-' + videoID);
+        if (list) {
+            var expanded = altBtn.getAttribute('aria-expanded') === 'true';
+            list.style.display = expanded ? 'none' : 'block';
+            altBtn.setAttribute('aria-expanded', String(!expanded));
+            if (chevron) chevron.textContent = expanded ? '▸' : '▾';
+        }
+        return;
+    }
+
+    // ── Change button: reveal full card, hide compact view ───
+    var changeBtn = e.target.closest('[data-change-id]');
+    if (changeBtn) {
+        var id = changeBtn.getAttribute('data-change-id');
+        var compact = document.getElementById('match-compact-' + id);
+        var full = document.getElementById('match-full-' + id);
+        if (compact) compact.style.display = 'none';
+        if (full) full.style.display = 'block';
+    }
 });
 </script>
 {{end}}
