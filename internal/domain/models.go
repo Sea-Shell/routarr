@@ -2,6 +2,17 @@ package domain
 
 import "time"
 
+// SyncRunEvent represents a single log entry emitted during a sync run.
+// Level is one of "info", "success", "error".
+type SyncRunEvent struct {
+	ID        int
+	RunID     int
+	CreatedAt time.Time
+	Level     string
+	Message   string
+	Details   string
+}
+
 type PlaylistMapping struct {
 	ID              int
 	YTPlaylistID    string

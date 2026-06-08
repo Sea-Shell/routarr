@@ -15,7 +15,9 @@ import (
 const syncRunStatusPending = "pending"
 
 const (
+	syncRunStatusRunning           = "running"
 	syncRunStatusCompleted         = "completed"
+	syncRunStatusFailed            = "failed"
 	syncItemActionAdded            = "added"
 	syncItemActionSkippedDuplicate = "skipped_duplicate"
 	syncItemActionFailed           = "failed"
@@ -42,13 +44,14 @@ type syncRunRepository interface {
 }
 
 type SyncService struct {
-	youtubeService  ports.YouTubeService
-	spotifyService  ports.SpotifyService
-	mappingRepo     ports.MappingRepository
-	matchRepo       ports.MatchRepository
-	candidateRepo   ports.CandidateRepository
-	matcher         Matcher
-	syncRunRepo     syncRunRepository
+	youtubeService   ports.YouTubeService
+	spotifyService   ports.SpotifyService
+	mappingRepo      ports.MappingRepository
+	matchRepo        ports.MatchRepository
+	candidateRepo    ports.CandidateRepository
+	matcher          Matcher
+	syncRunRepo      syncRunRepository
+	progressReporter ports.ProgressReporter
 }
 
 func NewSyncService(
@@ -91,6 +94,25 @@ func WithCandidateRepository(repo ports.CandidateRepository) SyncServiceOption {
 	}
 }
 
+// WithProgressReporter attaches a ProgressReporter that receives structured
+// progress notifications during sync operations. If nil or not provided, no
+// progress is reported. Reporter is called fire-and-forget; errors are ignored
+// so that reporting failures cannot abort a sync.
+func WithProgressReporter(reporter ports.ProgressReporter) SyncServiceOption {
+	return func(s *SyncService) {
+		s.progressReporter = reporter
+	}
+}
+
+// reportProgress emits a progress event if a reporter is configured.
+// It is a no-op when s.progressReporter is nil.
+func (s *SyncService) reportProgress(ctx context.Context, runID int, level, message string) {
+	if s.progressReporter == nil {
+		return
+	}
+	s.progressReporter.Report(ctx, runID, level, message)
+}
+
 func (s *SyncService) RunDry(ctx context.Context, mappingID int) (*domain.SyncRun, []domain.TrackMatch, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
@@ -116,19 +138,29 @@ func (s *SyncService) RunDry(ctx context.Context, mappingID int) (*domain.SyncRu
 		return nil, nil, err
 	}
 
+	s.reportProgress(ctx, run.ID, "info", "Created dry sync run")
+	s.reportProgress(ctx, run.ID, "info", "Fetching YouTube playlist")
+
 	videos, err := s.youtubeService.GetPlaylistVideos(ctx, mapping.YTPlaylistID)
 	if err != nil {
+		s.reportProgress(ctx, run.ID, "error", fmt.Sprintf("Failed to fetch YouTube playlist %q: %v", mapping.YTPlaylistID, err))
 		return nil, nil, fmt.Errorf("fetch youtube playlist %q: %w", mapping.YTPlaylistID, err)
 	}
 
+	s.reportProgress(ctx, run.ID, "info", fmt.Sprintf("Fetched %d YouTube videos", len(videos)))
+
 	matches := make([]domain.TrackMatch, 0, len(videos))
-	for _, video := range videos {
+	total := len(videos)
+	for i, video := range videos {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
 		}
 
+		s.reportProgress(ctx, run.ID, "info", fmt.Sprintf("Matching video %d/%d: %s", i+1, total, video.YTTitle))
+
 		match, err := s.resolveMatch(ctx, run.ID, video)
 		if err != nil {
+			s.reportProgress(ctx, run.ID, "error", fmt.Sprintf("Failed to match video %q: %v", video.YTVideoID, err))
 			return nil, nil, err
 		}
 		if match == nil {
@@ -138,7 +170,69 @@ func (s *SyncService) RunDry(ctx context.Context, mappingID int) (*domain.SyncRu
 		matches = append(matches, *match)
 	}
 
+	s.reportProgress(ctx, run.ID, "success", "Finished matching")
+
 	return run, matches, nil
+}
+
+// RunDryInto performs the same work as RunDry but uses a pre-created run
+// (with a valid ID already set) instead of creating one internally. The caller
+// is responsible for creating and persisting the run before calling this method.
+// This enables the web handler to redirect immediately to the progress page
+// before the dry sync completes.
+func (s *SyncService) RunDryInto(ctx context.Context, run *domain.SyncRun, mappingID int) ([]domain.TrackMatch, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if mappingID <= 0 {
+		return nil, fmt.Errorf("mapping id must be positive")
+	}
+	if run == nil || run.ID <= 0 {
+		return nil, fmt.Errorf("pre-created run must have a valid ID")
+	}
+
+	mapping, err := s.mappingRepo.GetByID(ctx, mappingID)
+	if err != nil {
+		return nil, fmt.Errorf("get mapping by id %d: %w", mappingID, err)
+	}
+	if mapping == nil {
+		return nil, fmt.Errorf("mapping id %d not found", mappingID)
+	}
+
+	s.reportProgress(ctx, run.ID, "info", "Fetching YouTube playlist")
+
+	videos, err := s.youtubeService.GetPlaylistVideos(ctx, mapping.YTPlaylistID)
+	if err != nil {
+		s.reportProgress(ctx, run.ID, "error", fmt.Sprintf("Failed to fetch YouTube playlist %q: %v", mapping.YTPlaylistID, err))
+		return nil, fmt.Errorf("fetch youtube playlist %q: %w", mapping.YTPlaylistID, err)
+	}
+
+	s.reportProgress(ctx, run.ID, "info", fmt.Sprintf("Fetched %d YouTube videos", len(videos)))
+
+	matches := make([]domain.TrackMatch, 0, len(videos))
+	total := len(videos)
+	for i, video := range videos {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		s.reportProgress(ctx, run.ID, "info", fmt.Sprintf("Matching video %d/%d: %s", i+1, total, video.YTTitle))
+
+		match, err := s.resolveMatch(ctx, run.ID, video)
+		if err != nil {
+			s.reportProgress(ctx, run.ID, "error", fmt.Sprintf("Failed to match video %q: %v", video.YTVideoID, err))
+			return nil, err
+		}
+		if match == nil {
+			continue
+		}
+
+		matches = append(matches, *match)
+	}
+
+	s.reportProgress(ctx, run.ID, "success", "Finished matching")
+
+	return matches, nil
 }
 
 func (s *SyncService) saveSyncRun(ctx context.Context, run *domain.SyncRun) error {
