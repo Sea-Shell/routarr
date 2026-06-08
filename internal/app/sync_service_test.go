@@ -1011,6 +1011,87 @@ func TestRunDryReportsFetchError(t *testing.T) {
 	}
 }
 
+// TestRunDryIntoUsesPreCreatedRun verifies that RunDryInto does NOT call
+// SaveSyncRun: the caller owns run creation. It should use the provided run's
+// ID for progress reporting and match persistence.
+func TestRunDryIntoUsesPreCreatedRun(t *testing.T) {
+	t.Parallel()
+
+	mapping := &domain.PlaylistMapping{ID: 20, YTPlaylistID: "yt-playlist"}
+	videos := []domain.TrackMatch{{YTVideoID: "video-x", YTTitle: "Artist - Track"}}
+	candidate := &domain.TrackMatch{SPTrackID: "sp-1", SPTitle: "Track", SPArtist: "Artist"}
+
+	mappingRepo := &mappingRepoStub{mapping: mapping}
+	matchRepo := &matchRepoStub{existing: map[string]*domain.TrackMatch{}}
+	yt := &youtubeServiceStub{videos: videos}
+	sp := &spotifyServiceStub{candidate: candidate}
+	m := &matcherStub{score: 0.91, decision: domain.MatchAuto}
+
+	svc := NewSyncService(yt, sp, mappingRepo, matchRepo, m)
+
+	// Pre-created run with ID already set — simulates caller creating run first.
+	preRun := &domain.SyncRun{
+		ID:        42,
+		MappingID: mapping.ID,
+		Status:    syncRunStatusRunning,
+		StartedAt: time.Now().UTC(),
+	}
+
+	matches, err := svc.RunDryInto(context.Background(), preRun, mapping.ID)
+	if err != nil {
+		t.Fatalf("RunDryInto() error = %v", err)
+	}
+
+	// SaveSyncRun must NOT be called — caller owns the run.
+	if mappingRepo.saveRunCalls != 0 {
+		t.Fatalf("SaveSyncRun called %d times, want 0", mappingRepo.saveRunCalls)
+	}
+
+	if len(matches) != 1 {
+		t.Fatalf("matches = %d, want 1", len(matches))
+	}
+	if matches[0].YTVideoID != "video-x" {
+		t.Fatalf("match YTVideoID = %q, want video-x", matches[0].YTVideoID)
+	}
+}
+
+// TestRunDryIntoReportsProgressWithPreCreatedRunID verifies that progress
+// events use the pre-created run's ID, not a freshly-generated one.
+func TestRunDryIntoReportsProgressWithPreCreatedRunID(t *testing.T) {
+	t.Parallel()
+
+	mapping := &domain.PlaylistMapping{ID: 21, YTPlaylistID: "yt-playlist"}
+	videos := []domain.TrackMatch{{YTVideoID: "v1", YTTitle: "Title"}}
+	candidate := &domain.TrackMatch{SPTrackID: "sp-2", SPTitle: "Title", SPArtist: "Artist"}
+
+	mappingRepo := &mappingRepoStub{mapping: mapping}
+	matchRepo := &matchRepoStub{existing: map[string]*domain.TrackMatch{}}
+	yt := &youtubeServiceStub{videos: videos}
+	sp := &spotifyServiceStub{candidate: candidate}
+	m := &matcherStub{score: 0.91, decision: domain.MatchAuto}
+	reporter := &fakeProgressReporter{}
+
+	svc := NewSyncService(yt, sp, mappingRepo, matchRepo, m,
+		WithProgressReporter(reporter),
+	)
+
+	preRun := &domain.SyncRun{ID: 99, MappingID: mapping.ID, Status: syncRunStatusRunning, StartedAt: time.Now().UTC()}
+
+	_, err := svc.RunDryInto(context.Background(), preRun, mapping.ID)
+	if err != nil {
+		t.Fatalf("RunDryInto() error = %v", err)
+	}
+
+	if len(reporter.calls) == 0 {
+		t.Fatal("expected progress events, got none")
+	}
+	for _, c := range reporter.calls {
+		if c.runID != 99 {
+			t.Errorf("progress event runID = %d, want 99", c.runID)
+		}
+	}
+}
+
 // TestWithProgressReporterWiresReporter verifies that WithProgressReporter
 // stores the reporter on the SyncService so it is available for use later.
 func TestWithProgressReporterWiresReporter(t *testing.T) {

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -381,6 +382,27 @@ func newTestHandler(t *testing.T, syncServices ...syncCommitter) (*sql.DB, *Hand
 	h.RegisterRoutes(mux)
 
 	return db, h, mux
+}
+
+// newTestHandlerWithAsyncRunner creates a Handler wired with a fake asyncDryRunner
+// for testing the async POST /mappings/{id}/sync flow.
+func newTestHandlerWithAsyncRunner(t *testing.T, db *sql.DB, runner asyncDryRunner) *Handler {
+	t.Helper()
+
+	h, err := NewHandler(
+		db,
+		sqlite.NewMappingRepository(db),
+		"http://localhost:8080",
+		"test-yt-client-id",
+		"test-yt-secret",
+		"test-sp-client-id",
+		"test-sp-secret",
+	)
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	h.asyncRunner = runner
+	return h
 }
 
 func setProviderConnected(t *testing.T, db *sql.DB, provider string) {
@@ -970,4 +992,239 @@ func TestPickCandidate_InvalidMode(t *testing.T) {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
 	readBody(t, resp) // drain
+}
+
+// dryRunnerIntoStub is a controllable fake for the asyncDryRunner interface.
+// The done channel is closed once RunDryInto is called, allowing tests to wait
+// for background goroutine completion deterministically.
+type dryRunnerIntoStub struct {
+	run     *domain.SyncRun    // run to populate (simulates pre-created run lookup)
+	matches []domain.TrackMatch // results to return
+	err     error               // error to return
+	done    chan struct{}        // closed when RunDryInto is called
+	once    sync.Once
+}
+
+func (s *dryRunnerIntoStub) RunDryInto(ctx context.Context, run *domain.SyncRun, mappingID int) ([]domain.TrackMatch, error) {
+	s.once.Do(func() { close(s.done) })
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.matches, nil
+}
+
+// TestRunDrySync_ReturnsImmediatelyWithRunningStatus verifies that POST /mappings/{id}/sync:
+// 1. Creates a sync_run row in the DB with status="running" before redirecting.
+// 2. Returns 303 to /runs/{id}/progress (not /runs/{id}).
+// 3. Does not block until dry sync completes.
+func TestRunDrySync_ReturnsImmediatelyWithRunningStatus(t *testing.T) {
+	t.Parallel()
+
+	db, _, _ := newTestHandler(t)
+
+	// Insert a mapping so handler can look it up.
+	_, err := db.ExecContext(t.Context(), `
+INSERT INTO playlist_mappings(youtube_playlist_id, youtube_playlist_title, spotify_playlist_id, spotify_playlist_title, created_at, updated_at)
+VALUES ('yt-async-1', 'Async YT', 'sp-async-1', 'Async SP', datetime('now'), datetime('now'))
+`)
+	if err != nil {
+		t.Fatalf("insert mapping: %v", err)
+	}
+	var mappingID int64
+	if err := db.QueryRowContext(t.Context(), `SELECT id FROM playlist_mappings WHERE youtube_playlist_id = 'yt-async-1'`).Scan(&mappingID); err != nil {
+		t.Fatalf("get mapping id: %v", err)
+	}
+
+	done := make(chan struct{})
+	stub := &dryRunnerIntoStub{
+		done:    done,
+		matches: []domain.TrackMatch{{YTVideoID: "v1"}},
+	}
+
+	h := newTestHandlerWithAsyncRunner(t, db, stub)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	// Perform the POST — should return immediately.
+	resp := performRequest(t, mux, http.MethodPost,
+		fmt.Sprintf("/mappings/%d/sync", mappingID),
+		"", "",
+	)
+
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusSeeOther, readBody(t, resp))
+	}
+
+	loc := resp.Header.Get("Location")
+	if !strings.Contains(loc, "/progress") {
+		t.Fatalf("Location = %q, want path ending in /progress", loc)
+	}
+
+	// A sync_run row must exist before we process response.
+	var runStatus string
+	err = db.QueryRowContext(t.Context(), `SELECT status FROM sync_runs WHERE mapping_id = ?`, mappingID).Scan(&runStatus)
+	if err != nil {
+		t.Fatalf("query sync run: %v", err)
+	}
+	if runStatus != syncRunStatusRunning && runStatus != syncRunStatusCompleted {
+		t.Fatalf("run status = %q, want %q or %q", runStatus, syncRunStatusRunning, syncRunStatusCompleted)
+	}
+
+	// Wait for background goroutine to finish.
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for background job")
+	}
+}
+
+// TestRunDrySync_BackgroundJobSavesEvents verifies that after the background
+// goroutine completes, progress events are persisted and the run is marked completed.
+func TestRunDrySync_BackgroundJobSavesEvents(t *testing.T) {
+	t.Parallel()
+
+	db, _, _ := newTestHandler(t)
+
+	_, err := db.ExecContext(t.Context(), `
+INSERT INTO playlist_mappings(youtube_playlist_id, youtube_playlist_title, spotify_playlist_id, spotify_playlist_title, created_at, updated_at)
+VALUES ('yt-async-2', 'Async YT 2', 'sp-async-2', 'Async SP 2', datetime('now'), datetime('now'))
+`)
+	if err != nil {
+		t.Fatalf("insert mapping: %v", err)
+	}
+	var mappingID int64
+	if err := db.QueryRowContext(t.Context(), `SELECT id FROM playlist_mappings WHERE youtube_playlist_id = 'yt-async-2'`).Scan(&mappingID); err != nil {
+		t.Fatalf("get mapping id: %v", err)
+	}
+
+	// Pre-insert track_match so sync_items FK is satisfied when the goroutine persists items.
+	_, err = db.ExecContext(t.Context(), `
+INSERT INTO track_matches(youtube_video_id, youtube_title, spotify_track_id, spotify_track_title, spotify_artist, confidence, decision, decision_source)
+VALUES ('yt-bg-1', 'BG Track', 'sp-bg-1', 'BG Spotify', 'BG Artist', 0.9, 'auto', 'matcher')
+`)
+	if err != nil {
+		t.Fatalf("insert track match: %v", err)
+	}
+
+	done := make(chan struct{})
+	stub := &dryRunnerIntoStub{
+		done:    done,
+		matches: []domain.TrackMatch{{YTVideoID: "yt-bg-1"}},
+	}
+
+	h := newTestHandlerWithAsyncRunner(t, db, stub)
+	mux2 := http.NewServeMux()
+	h.RegisterRoutes(mux2)
+
+	resp := performRequest(t, mux2, http.MethodPost,
+		fmt.Sprintf("/mappings/%d/sync", mappingID),
+		"", "",
+	)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusSeeOther, readBody(t, resp))
+	}
+	readBody(t, resp) // drain
+
+	// Wait for background goroutine to finish.
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for background job")
+	}
+
+	// Give the goroutine time to persist final state.
+	time.Sleep(50 * time.Millisecond)
+
+	// The run should be marked completed or failed (not running anymore).
+	var runStatus string
+	err = db.QueryRowContext(t.Context(), `SELECT status FROM sync_runs WHERE mapping_id = ?`, mappingID).Scan(&runStatus)
+	if err != nil {
+		t.Fatalf("query sync run: %v", err)
+	}
+	if runStatus == syncRunStatusRunning {
+		t.Fatalf("run status = %q, want completed or failed (not running)", runStatus)
+	}
+
+	// sync_items must have been persisted.
+	var itemCount int
+	err = db.QueryRowContext(t.Context(), `
+SELECT COUNT(1) FROM sync_items si
+JOIN sync_runs sr ON sr.id = si.sync_run_id
+WHERE sr.mapping_id = ?
+`, mappingID).Scan(&itemCount)
+	if err != nil {
+		t.Fatalf("query sync items: %v", err)
+	}
+	if itemCount == 0 {
+		t.Fatal("expected sync_items to be persisted, got 0")
+	}
+}
+
+// TestRunDrySync_FailedJobMarksRunFailed verifies that when the background
+// job returns an error, the run is marked with status="failed".
+func TestRunDrySync_FailedJobMarksRunFailed(t *testing.T) {
+	t.Parallel()
+
+	db, _, _ := newTestHandler(t)
+
+	_, err := db.ExecContext(t.Context(), `
+INSERT INTO playlist_mappings(youtube_playlist_id, youtube_playlist_title, spotify_playlist_id, spotify_playlist_title, created_at, updated_at)
+VALUES ('yt-async-3', 'Async YT 3', 'sp-async-3', 'Async SP 3', datetime('now'), datetime('now'))
+`)
+	if err != nil {
+		t.Fatalf("insert mapping: %v", err)
+	}
+	var mappingID int64
+	if err := db.QueryRowContext(t.Context(), `SELECT id FROM playlist_mappings WHERE youtube_playlist_id = 'yt-async-3'`).Scan(&mappingID); err != nil {
+		t.Fatalf("get mapping id: %v", err)
+	}
+
+	done := make(chan struct{})
+	stub := &dryRunnerIntoStub{
+		done: done,
+		err:  fmt.Errorf("simulated dry sync failure"),
+	}
+
+	h := newTestHandlerWithAsyncRunner(t, db, stub)
+	mux2 := http.NewServeMux()
+	h.RegisterRoutes(mux2)
+
+	resp := performRequest(t, mux2, http.MethodPost,
+		fmt.Sprintf("/mappings/%d/sync", mappingID),
+		"", "",
+	)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusSeeOther, readBody(t, resp))
+	}
+	readBody(t, resp)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for background job")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	var runStatus string
+	err = db.QueryRowContext(t.Context(), `SELECT status FROM sync_runs WHERE mapping_id = ?`, mappingID).Scan(&runStatus)
+	if err != nil {
+		t.Fatalf("query sync run: %v", err)
+	}
+	if runStatus != syncRunStatusFailed {
+		t.Fatalf("run status = %q, want %q", runStatus, syncRunStatusFailed)
+	}
+
+	// A "failed" progress event must exist.
+	var errEventCount int
+	if qErr := db.QueryRowContext(t.Context(), `
+SELECT COUNT(1) FROM sync_run_events sre
+JOIN sync_runs sr ON sr.id = sre.sync_run_id
+WHERE sr.mapping_id = ? AND sre.level = 'error'
+`, mappingID).Scan(&errEventCount); qErr != nil {
+		t.Fatalf("query error events: %v", qErr)
+	}
+	if errEventCount == 0 {
+		t.Fatal("expected at least one error event, got 0")
+	}
 }
