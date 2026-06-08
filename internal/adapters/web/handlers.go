@@ -148,10 +148,23 @@ type reviewItemView struct {
 	SpotifyArtist  string
 	SpotifyURL     string // https://open.spotify.com/track/<SPTrackID>
 	Confidence     float64
+	Decision       string
 	IsPriorChoice  bool
 	IsAutoMatch    bool // true when decision="auto"; controls initial expand state of alternatives
 	// Candidates holds the top alternative matches from the current run.
 	Candidates []candidateView
+}
+
+func (v reviewItemView) IsResolved() bool {
+	return v.IsApproved() || v.IsRejected()
+}
+
+func (v reviewItemView) IsApproved() bool {
+	return domain.MatchDecision(v.Decision) == domain.MatchApproved
+}
+
+func (v reviewItemView) IsRejected() bool {
+	return domain.MatchDecision(v.Decision) == domain.MatchRejected
 }
 
 // candidateView is one Spotify search result shown as an alternative.
@@ -895,7 +908,7 @@ WHERE youtube_video_id = ?
 	if decision == string(domain.MatchRejected) {
 		flash = "Match+rejected"
 	}
-	http.Redirect(w, r, fmt.Sprintf("/runs/%d/review?flash=%s", runID, flash), http.StatusSeeOther)
+	http.Redirect(w, r, fmt.Sprintf("/runs/%d/review?flash=%s#match-%s", runID, flash, ytVideoID), http.StatusSeeOther)
 }
 
 // pickCandidate handles POST /runs/{id}/review/pick.
@@ -966,7 +979,7 @@ SELECT COUNT(1) FROM sync_items WHERE sync_run_id = ? AND youtube_video_id = ?
 		}
 	}
 
-	http.Redirect(w, r, fmt.Sprintf("/runs/%d/review?flash=Candidate+picked", runID), http.StatusSeeOther)
+	http.Redirect(w, r, fmt.Sprintf("/runs/%d/review?flash=Candidate+picked#match-%s", runID, ytVideoID), http.StatusSeeOther)
 }
 
 func (h *Handler) oauthConnect(w http.ResponseWriter, r *http.Request) {
@@ -1198,10 +1211,8 @@ WHERE si.sync_run_id = ? AND tm.decision = ?
 }
 
 func (h *Handler) listPendingReviewItems(ctx context.Context, runID int) ([]reviewItemView, error) {
-	// Include:
-	//   - pending matches (need human decision)
-	//   - manual prior choices (decision_source='user') so the badge is reachable
-	//     and the reviewer can pick a different candidate or re-confirm.
+	// Return all items associated with the sync run so the review queue remains
+	// stable (resolved items stay in their original playlist position).
 	rows, err := h.db.QueryContext(ctx, `
 SELECT
 	tm.youtube_video_id,
@@ -1215,12 +1226,8 @@ SELECT
 FROM sync_items si
 JOIN track_matches tm ON tm.youtube_video_id = si.youtube_video_id
 WHERE si.sync_run_id = ?
-	AND (
-		tm.decision = ?
-		OR (tm.decision = ? AND tm.decision_source = 'user')
-	)
 ORDER BY si.id ASC
-`, runID, string(domain.MatchPending), string(domain.MatchApproved))
+`, runID)
 	if err != nil {
 		return nil, fmt.Errorf("query pending review items: %w", err)
 	}
@@ -1230,7 +1237,6 @@ ORDER BY si.id ASC
 	for rows.Next() {
 		var item reviewItemView
 		var decisionSource string
-		var decision string
 		if err := rows.Scan(
 			&item.YouTubeVideoID,
 			&item.YouTubeTitle,
@@ -1239,14 +1245,14 @@ ORDER BY si.id ASC
 			&item.SpotifyArtist,
 			&item.Confidence,
 			&decisionSource,
-			&decision,
+			&item.Decision,
 		); err != nil {
 			return nil, fmt.Errorf("scan pending review item: %w", err)
 		}
 		item.YouTubeURL = youtubeVideoURL(item.YouTubeVideoID)
 		item.SpotifyURL = spotifyTrackURL(item.SpotifyTrackID)
 		item.IsPriorChoice = decisionSource == "user"
-		item.IsAutoMatch = domain.MatchDecision(decision) == domain.MatchAuto
+		item.IsAutoMatch = domain.MatchDecision(item.Decision) == domain.MatchAuto
 		items = append(items, item)
 	}
 

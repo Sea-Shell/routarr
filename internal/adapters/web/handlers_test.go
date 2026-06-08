@@ -1318,3 +1318,214 @@ VALUES (?, 'running', datetime('now'))
 		t.Fatalf("async runner called %d times, want 0", n)
 	}
 }
+
+// insertReviewFixture creates a mapping + sync run and inserts one or more
+// track_matches+sync_items for the given videos into the run. Returns runID.
+// decision must be a valid domain.MatchDecision string (e.g. "pending", "auto").
+type reviewVideo struct {
+	ytVideoID string
+	title     string
+	decision  string // domain.MatchDecision string
+}
+
+func insertReviewFixture(t *testing.T, db *sql.DB, videos []reviewVideo) int64 {
+	t.Helper()
+
+	_, err := db.ExecContext(t.Context(), `
+INSERT INTO playlist_mappings(youtube_playlist_id, youtube_playlist_title, spotify_playlist_id, spotify_playlist_title, created_at, updated_at)
+VALUES ('yt-rv-fix', 'RV YT', 'sp-rv-fix', 'RV SP', datetime('now'), datetime('now'))
+`)
+	if err != nil {
+		t.Fatalf("insertReviewFixture: insert mapping: %v", err)
+	}
+	var mappingID int64
+	if err := db.QueryRowContext(t.Context(), `SELECT id FROM playlist_mappings WHERE youtube_playlist_id = 'yt-rv-fix'`).Scan(&mappingID); err != nil {
+		t.Fatalf("insertReviewFixture: get mapping id: %v", err)
+	}
+
+	res, err := db.ExecContext(t.Context(), `
+INSERT INTO sync_runs(mapping_id, status, started_at)
+VALUES (?, 'pending', datetime('now'))
+`, mappingID)
+	if err != nil {
+		t.Fatalf("insertReviewFixture: insert run: %v", err)
+	}
+	runID, _ := res.LastInsertId()
+
+	for _, v := range videos {
+		_, err = db.ExecContext(t.Context(), `
+INSERT INTO track_matches(youtube_video_id, youtube_title, spotify_track_id, spotify_track_title, spotify_artist, confidence, decision, decision_source, created_at)
+VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, v.ytVideoID, v.title, "sp-"+v.ytVideoID, "SP "+v.title, "Artist", 0.55, v.decision, "matcher", time.Now().UTC())
+		if err != nil {
+			t.Fatalf("insertReviewFixture: insert track_match %s: %v", v.ytVideoID, err)
+		}
+		_, err = db.ExecContext(t.Context(), `
+INSERT INTO sync_items(sync_run_id, youtube_video_id, selected_spotify_track_id, action)
+VALUES(?, ?, ?, ?)
+`, runID, v.ytVideoID, "sp-"+v.ytVideoID, "pending_review")
+		if err != nil {
+			t.Fatalf("insertReviewFixture: insert sync_item %s: %v", v.ytVideoID, err)
+		}
+	}
+
+	return runID
+}
+
+// TestApproveRedirectIncludesFragment verifies that POST /runs/{id}/review/approve
+// redirects to a Location containing the fragment #match-{youtube_video_id}.
+func TestApproveRedirectIncludesFragment(t *testing.T) {
+	t.Parallel()
+
+	db, _, mux := newTestHandler(t)
+	runID := insertReviewFixture(t, db, []reviewVideo{
+		{ytVideoID: "yt-frag-approve", title: "Frag Approve", decision: string(domain.MatchPending)},
+	})
+
+	resp := performRequest(t, mux, http.MethodPost,
+		fmt.Sprintf("/runs/%d/review/approve", runID),
+		url.Values{"youtube_video_id": {"yt-frag-approve"}}.Encode(),
+		"application/x-www-form-urlencoded",
+	)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("approve status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
+	}
+	loc := resp.Header.Get("Location")
+	wantFragment := "#match-yt-frag-approve"
+	if !strings.Contains(loc, wantFragment) {
+		t.Fatalf("approve redirect Location = %q, missing fragment %q", loc, wantFragment)
+	}
+}
+
+// TestRejectRedirectIncludesFragment verifies that POST /runs/{id}/review/reject
+// redirects to a Location containing the fragment #match-{youtube_video_id}.
+func TestRejectRedirectIncludesFragment(t *testing.T) {
+	t.Parallel()
+
+	db, _, mux := newTestHandler(t)
+	runID := insertReviewFixture(t, db, []reviewVideo{
+		{ytVideoID: "yt-frag-reject", title: "Frag Reject", decision: string(domain.MatchPending)},
+	})
+
+	resp := performRequest(t, mux, http.MethodPost,
+		fmt.Sprintf("/runs/%d/review/reject", runID),
+		url.Values{"youtube_video_id": {"yt-frag-reject"}}.Encode(),
+		"application/x-www-form-urlencoded",
+	)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("reject status = %d, want %d", resp.StatusCode, http.StatusSeeOther)
+	}
+	loc := resp.Header.Get("Location")
+	wantFragment := "#match-yt-frag-reject"
+	if !strings.Contains(loc, wantFragment) {
+		t.Fatalf("reject redirect Location = %q, missing fragment %q", loc, wantFragment)
+	}
+}
+
+// TestReviewPageIncludesResolvedItems verifies that GET /runs/{id}/review renders
+// both pending and resolved (approved/rejected) items in the original run order,
+// with correct anchor ids, compact resolved indicators, and Change control.
+func TestReviewPageIncludesResolvedItems(t *testing.T) {
+	t.Parallel()
+
+	db, _, mux := newTestHandler(t)
+
+	// Three videos: first pending, second will be approved, third will be rejected.
+	runID := insertReviewFixture(t, db, []reviewVideo{
+		{ytVideoID: "rv-vid-a", title: "Video A", decision: string(domain.MatchPending)},
+		{ytVideoID: "rv-vid-b", title: "Video B", decision: string(domain.MatchPending)},
+		{ytVideoID: "rv-vid-c", title: "Video C", decision: string(domain.MatchPending)},
+	})
+
+	// Approve second video.
+	_, err := db.ExecContext(t.Context(),
+		`UPDATE track_matches SET decision = ?, decision_source = 'user' WHERE youtube_video_id = ?`,
+		string(domain.MatchApproved), "rv-vid-b",
+	)
+	if err != nil {
+		t.Fatalf("approve rv-vid-b: %v", err)
+	}
+
+	// Reject third video.
+	_, err = db.ExecContext(t.Context(),
+		`UPDATE track_matches SET decision = ?, decision_source = 'user' WHERE youtube_video_id = ?`,
+		string(domain.MatchRejected), "rv-vid-c",
+	)
+	if err != nil {
+		t.Fatalf("reject rv-vid-c: %v", err)
+	}
+
+	resp := performRequest(t, mux, http.MethodGet, fmt.Sprintf("/runs/%d/review", runID), "", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /runs/{id}/review status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	body := readBody(t, resp)
+
+	// All three anchor ids must appear (original playlist order preserved).
+	for _, vid := range []string{"rv-vid-a", "rv-vid-b", "rv-vid-c"} {
+		anchor := `id="match-` + vid + `"`
+		if !strings.Contains(body, anchor) {
+			t.Errorf("review page missing anchor %q", anchor)
+		}
+	}
+
+	// Approved item must render the compact approved indicator and Change button.
+	if !strings.Contains(body, "Approved") {
+		t.Errorf("review page missing Approved badge for rv-vid-b")
+	}
+	if !strings.Contains(body, `id="match-compact-rv-vid-b"`) {
+		t.Errorf("review page missing compact container for approved rv-vid-b")
+	}
+
+	// Rejected item must render the compact rejected indicator and Change button.
+	if !strings.Contains(body, "Rejected") {
+		t.Errorf("review page missing Rejected badge for rv-vid-c")
+	}
+	if !strings.Contains(body, `id="match-compact-rv-vid-c"`) {
+		t.Errorf("review page missing compact container for rejected rv-vid-c")
+	}
+
+	// Change button must appear (at least once, for the resolved items).
+	if !strings.Contains(body, "Change") {
+		t.Errorf("review page missing Change button for resolved items")
+	}
+
+	// The pending item must still render the full card (Approve action present).
+	if !strings.Contains(body, "Approve") {
+		t.Errorf("review page missing Approve action for pending rv-vid-a")
+	}
+}
+
+// TestAutoDecisionNotCompactRejected verifies that an item with decision="auto"
+// is NOT treated as a compact-rejected card. The auto item must not render
+// the Rejected badge (it is not resolved/rejected — it's a pending auto-match).
+func TestAutoDecisionNotCompactRejected(t *testing.T) {
+	t.Parallel()
+
+	db, _, mux := newTestHandler(t)
+	runID := insertReviewFixture(t, db, []reviewVideo{
+		{ytVideoID: "rv-auto-1", title: "Auto Video", decision: string(domain.MatchAuto)},
+	})
+
+	resp := performRequest(t, mux, http.MethodGet, fmt.Sprintf("/runs/%d/review", runID), "", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /runs/{id}/review status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	body := readBody(t, resp)
+
+	// Anchor must exist for the auto item.
+	if !strings.Contains(body, `id="match-rv-auto-1"`) {
+		t.Errorf("review page missing anchor for auto item rv-auto-1")
+	}
+
+	// The Rejected badge must NOT appear for an auto-match item.
+	if strings.Contains(body, `<span class="badge-rejected">Rejected</span>`) {
+		t.Errorf("auto-match item incorrectly rendered as compact-rejected")
+	}
+
+	// reviewItemView helpers: verify via rendered output that IsRejected is false
+	// for auto — no compact container should appear for an auto item.
+	if strings.Contains(body, `id="match-compact-rv-auto-1"`) {
+		t.Errorf("auto-match item incorrectly rendered as compact resolved card")
+	}
+}
