@@ -64,10 +64,6 @@ type syncCommitter interface {
 	Commit(ctx context.Context, syncRunID int) error
 }
 
-type dryRunner interface {
-	RunDry(ctx context.Context, mappingID int) (*domain.SyncRun, []domain.TrackMatch, error)
-}
-
 // asyncDryRunner performs a dry sync into a pre-created run.
 // The run must already exist in the DB before this is called.
 type asyncDryRunner interface {
@@ -581,26 +577,6 @@ func (h *Handler) getSyncService(ctx context.Context) (syncCommitter, error) {
 	return app.NewSyncService(nil, spotifyService, h.mappingRepo, matchRepo, matcher.NewMatcher()), nil
 }
 
-func (h *Handler) buildDryRunner(ctx context.Context) (dryRunner, error) {
-	ytToken, ytClient, err := h.getProviderTokenFresh(ctx, providerYouTube)
-	if err != nil {
-		return nil, fmt.Errorf("get youtube token: %w", err)
-	}
-	spToken, spClient, err := h.getProviderTokenFresh(ctx, providerSpotify)
-	if err != nil {
-		return nil, fmt.Errorf("get spotify token: %w", err)
-	}
-
-	ytService := youtube.NewAdapter(ytClient, ytToken)
-	spService := spotify.NewAdapter(spClient, spToken)
-	matchRepo := sqlite.NewMatchRepository(h.db)
-	candidateRepo := sqlite.NewCandidateRepository(h.db)
-	return app.NewSyncService(
-		ytService, spService, h.mappingRepo, matchRepo, matcher.NewMatcher(),
-		app.WithCandidateRepository(candidateRepo),
-	), nil
-}
-
 // buildAsyncRunner constructs a SyncService wired for background dry-sync.
 // It fetches OAuth tokens using the provided context (from the HTTP request),
 // then configures the service with a dbProgressReporter so events are persisted.
@@ -643,6 +619,25 @@ func (h *Handler) runDrySync(w http.ResponseWriter, r *http.Request) {
 	mappingID, ok := parsePathInt(r.PathValue("id"))
 	if !ok {
 		http.NotFound(w, r)
+		return
+	}
+
+	// Guard: if a running dry sync already exists for this mapping, redirect
+	// to its progress page instead of creating a duplicate.
+	var existingRunID int
+	guardErr := h.db.QueryRowContext(r.Context(), `
+SELECT id FROM sync_runs
+WHERE mapping_id = ? AND status = ?
+ORDER BY started_at DESC, id DESC
+LIMIT 1
+`, mappingID, syncRunStatusRunning).Scan(&existingRunID)
+	if guardErr == nil {
+		// An active run exists — redirect to it.
+		http.Redirect(w, r, fmt.Sprintf("/runs/%d/progress", existingRunID), http.StatusSeeOther)
+		return
+	}
+	if !errors.Is(guardErr, sql.ErrNoRows) {
+		http.Error(w, fmt.Sprintf("check existing sync run: %v", guardErr), http.StatusInternalServerError)
 		return
 	}
 
