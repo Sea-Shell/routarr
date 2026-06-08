@@ -201,3 +201,50 @@ func TestMatchRepositoryCRUD(t *testing.T) {
 		t.Fatalf("GetMatch(not-found) = %+v, want nil", notFound)
 	}
 }
+
+func TestSyncRunEventsTableExists(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "yt2sp.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if closeErr := db.Close(); closeErr != nil {
+			t.Fatalf("close db: %v", closeErr)
+		}
+	})
+
+	// Verify table exists after migrations.
+	var name string
+	err = db.QueryRowContext(ctx,
+		`SELECT name FROM sqlite_master WHERE type='table' AND name='sync_run_events'`,
+	).Scan(&name)
+	if err != nil {
+		t.Fatalf("sync_run_events table not found: %v", err)
+	}
+	if name != "sync_run_events" {
+		t.Fatalf("sync_run_events table name = %q, want %q", name, "sync_run_events")
+	}
+
+	// Verify index on sync_run_id exists.
+	var idxName string
+	err = db.QueryRowContext(ctx,
+		`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_sync_run_events_sync_run_id'`,
+	).Scan(&idxName)
+	if err != nil {
+		t.Fatalf("idx_sync_run_events_sync_run_id index not found: %v", err)
+	}
+
+	// Verify SyncRunEvent domain type is usable (compile-time check via assignment).
+	_ = domain.SyncRunEvent{
+		ID:        1,
+		RunID:     2,
+		Level:     "info",
+		Message:   "test",
+		Details:   "optional",
+	}
+}
