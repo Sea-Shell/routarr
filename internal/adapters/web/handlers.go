@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -33,6 +34,14 @@ const (
 	providerSpotify = "spotify"
 )
 
+// Dry-run lifecycle statuses used when the web handler creates or updates sync runs.
+// These must match the status values used in the app layer and stored in the DB.
+const (
+	syncRunStatusRunning   = "running"
+	syncRunStatusCompleted = "completed"
+	syncRunStatusFailed    = "failed"
+)
+
 //go:embed templates/*.gohtml
 var templateFS embed.FS
 
@@ -43,6 +52,9 @@ type Handler struct {
 	candidateRepo ports.CandidateRepository
 	eventRepo     ports.SyncRunEventRepository
 	syncService   syncCommitter
+	// asyncRunner performs the background dry sync. Set in production by
+	// buildAsyncRunner; overridable in tests.
+	asyncRunner asyncDryRunner
 	templates     map[string]*template.Template
 	oauthConfigs  map[string]*oauth2.Config
 	oauthTokenExchanger func(ctx context.Context, conf *oauth2.Config, code string) (*oauth2.Token, error)
@@ -54,6 +66,30 @@ type syncCommitter interface {
 
 type dryRunner interface {
 	RunDry(ctx context.Context, mappingID int) (*domain.SyncRun, []domain.TrackMatch, error)
+}
+
+// asyncDryRunner performs a dry sync into a pre-created run.
+// The run must already exist in the DB before this is called.
+type asyncDryRunner interface {
+	RunDryInto(ctx context.Context, run *domain.SyncRun, mappingID int) ([]domain.TrackMatch, error)
+}
+
+// dbProgressReporter implements ports.ProgressReporter by persisting events
+// to the sync_run_events table via the event repository.
+type dbProgressReporter struct {
+	eventRepo ports.SyncRunEventRepository
+}
+
+func (r *dbProgressReporter) Report(ctx context.Context, runID int, level, message string) {
+	ev := &domain.SyncRunEvent{
+		RunID:   runID,
+		Level:   level,
+		Message: message,
+	}
+	// Best-effort: errors are logged but do not abort the sync.
+	if err := r.eventRepo.SaveSyncRunEvent(ctx, ev); err != nil {
+		slog.Warn("failed to save sync run event", "run_id", runID, "level", level, "error", err)
+	}
 }
 
 type indexViewData struct {
@@ -565,6 +601,44 @@ func (h *Handler) buildDryRunner(ctx context.Context) (dryRunner, error) {
 	), nil
 }
 
+// buildAsyncRunner constructs a SyncService wired for background dry-sync.
+// It fetches OAuth tokens using the provided context (from the HTTP request),
+// then configures the service with a dbProgressReporter so events are persisted.
+func (h *Handler) buildAsyncRunner(ctx context.Context) (asyncDryRunner, error) {
+	ytToken, ytClient, err := h.getProviderTokenFresh(ctx, providerYouTube)
+	if err != nil {
+		return nil, fmt.Errorf("get youtube token: %w", err)
+	}
+	spToken, spClient, err := h.getProviderTokenFresh(ctx, providerSpotify)
+	if err != nil {
+		return nil, fmt.Errorf("get spotify token: %w", err)
+	}
+
+	ytService := youtube.NewAdapter(ytClient, ytToken)
+	spService := spotify.NewAdapter(spClient, spToken)
+	matchRepo := sqlite.NewMatchRepository(h.db)
+	candidateRepo := sqlite.NewCandidateRepository(h.db)
+	return app.NewSyncService(
+		ytService, spService, h.mappingRepo, matchRepo, matcher.NewMatcher(),
+		app.WithCandidateRepository(candidateRepo),
+		app.WithProgressReporter(&dbProgressReporter{eventRepo: h.eventRepo}),
+	), nil
+}
+
+// persistSyncItems inserts a sync_items row for each match returned by RunDry/RunDryInto.
+// action='pending_review' marks items awaiting user review in the UI.
+func (h *Handler) persistSyncItems(ctx context.Context, runID int, matches []domain.TrackMatch) error {
+	for _, m := range matches {
+		if _, err := h.db.ExecContext(ctx, `
+INSERT INTO sync_items(sync_run_id, youtube_video_id, action)
+VALUES (?, ?, 'pending_review')
+`, runID, m.YTVideoID); err != nil {
+			return fmt.Errorf("save sync item for video %q: %w", m.YTVideoID, err)
+		}
+	}
+	return nil
+}
+
 func (h *Handler) runDrySync(w http.ResponseWriter, r *http.Request) {
 	mappingID, ok := parsePathInt(r.PathValue("id"))
 	if !ok {
@@ -572,31 +646,76 @@ func (h *Handler) runDrySync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	runner, err := h.buildDryRunner(r.Context())
-	if err != nil {
-		http.Error(w, fmt.Sprintf("build sync service: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	run, matches, err := runner.RunDry(r.Context(), mappingID)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("dry sync: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// Persist a sync_item row for every match returned by RunDry.
-	// action='pending_review' is displayed as "pending" in the telemetry UI.
-	for _, m := range matches {
-		if _, err := h.db.ExecContext(r.Context(), `
-INSERT INTO sync_items(sync_run_id, youtube_video_id, action)
-VALUES (?, ?, 'pending_review')
-`, run.ID, m.YTVideoID); err != nil {
-			http.Error(w, fmt.Sprintf("save sync item: %v", err), http.StatusInternalServerError)
+	// Resolve the async runner — prefer injected test stub, fall back to building
+	// a real one from OAuth tokens.
+	runner := h.asyncRunner
+	if runner == nil {
+		var err error
+		runner, err = h.buildAsyncRunner(r.Context())
+		if err != nil {
+			http.Error(w, fmt.Sprintf("build sync service: %v", err), http.StatusInternalServerError)
 			return
 		}
 	}
 
-	http.Redirect(w, r, fmt.Sprintf("/runs/%d", run.ID), http.StatusSeeOther)
+	// Create the run synchronously so it exists before we redirect.
+	res, err := h.db.ExecContext(r.Context(), `
+INSERT INTO sync_runs(mapping_id, status, started_at)
+VALUES (?, ?, datetime('now'))
+`, mappingID, syncRunStatusRunning)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("create sync run: %v", err), http.StatusInternalServerError)
+		return
+	}
+	runIDRaw, err := res.LastInsertId()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("get run id: %v", err), http.StatusInternalServerError)
+		return
+	}
+	runID := int(runIDRaw)
+
+	run := &domain.SyncRun{
+		ID:        runID,
+		MappingID: mappingID,
+		Status:    syncRunStatusRunning,
+	}
+
+	// Detach from request context so the goroutine outlives the HTTP response.
+	// Add a 30-minute cap to prevent runaway background jobs.
+	bgCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Minute)
+
+	go func() {
+		defer cancel()
+
+		matches, dryErr := runner.RunDryInto(bgCtx, run, mappingID)
+		if dryErr != nil {
+			// Persist an error event and mark the run failed.
+			ev := &domain.SyncRunEvent{RunID: runID, Level: "error", Message: fmt.Sprintf("Dry sync failed: %v", dryErr)}
+			if saveErr := h.eventRepo.SaveSyncRunEvent(bgCtx, ev); saveErr != nil {
+				slog.Warn("failed to save error event", "run_id", runID, "error", saveErr)
+			}
+			if _, updateErr := h.db.ExecContext(bgCtx, `
+UPDATE sync_runs SET status = ?, finished_at = datetime('now') WHERE id = ?
+`, syncRunStatusFailed, runID); updateErr != nil {
+				slog.Warn("failed to mark run failed", "run_id", runID, "error", updateErr)
+			}
+			return
+		}
+
+		// Persist sync_items for the matched tracks.
+		if itemErr := h.persistSyncItems(bgCtx, runID, matches); itemErr != nil {
+			slog.Warn("failed to persist sync items", "run_id", runID, "error", itemErr)
+		}
+
+		// Mark the run completed.
+		if _, updateErr := h.db.ExecContext(bgCtx, `
+UPDATE sync_runs SET status = ?, finished_at = datetime('now') WHERE id = ?
+`, syncRunStatusCompleted, runID); updateErr != nil {
+			slog.Warn("failed to mark run completed", "run_id", runID, "error", updateErr)
+		}
+	}()
+
+	http.Redirect(w, r, fmt.Sprintf("/runs/%d/progress", runID), http.StatusSeeOther)
 }
 
 // getProviderTokenFresh loads the stored OAuth token for provider, refreshes it
