@@ -14,6 +14,7 @@ import (
 var _ ports.MappingRepository = (*MappingRepository)(nil)
 var _ ports.MatchRepository = (*MatchRepository)(nil)
 var _ ports.CandidateRepository = (*CandidateRepository)(nil)
+var _ ports.SyncRunEventRepository = (*SyncRunEventRepository)(nil)
 
 type MappingRepository struct {
 	db *sql.DB
@@ -559,4 +560,77 @@ ORDER BY youtube_video_id, rank ASC
 	}
 
 	return result, nil
+}
+
+// SyncRunEventRepository persists structured log events for a sync run.
+type SyncRunEventRepository struct {
+	db *sql.DB
+}
+
+func NewSyncRunEventRepository(db *sql.DB) *SyncRunEventRepository {
+	return &SyncRunEventRepository{db: db}
+}
+
+// SaveSyncRunEvent inserts a new event row. Sets event.ID to the generated rowid.
+// If event.CreatedAt is zero, it is set to time.Now().UTC() before insert.
+func (r *SyncRunEventRepository) SaveSyncRunEvent(ctx context.Context, event *domain.SyncRunEvent) error {
+	if r == nil || r.db == nil {
+		return fmt.Errorf("sync run event repository is not initialized")
+	}
+	if event == nil {
+		return fmt.Errorf("sync run event is nil")
+	}
+
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+
+	res, err := r.db.ExecContext(ctx, `
+INSERT INTO sync_run_events(sync_run_id, created_at, level, message, details)
+VALUES (?, ?, ?, ?, ?)
+`, event.RunID, event.CreatedAt, event.Level, event.Message, event.Details)
+	if err != nil {
+		return fmt.Errorf("insert sync run event: %w", err)
+	}
+
+	id, err := res.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("read inserted sync run event id: %w", err)
+	}
+	event.ID = int(id)
+
+	return nil
+}
+
+// ListSyncRunEvents returns all events for runID ordered by created_at ASC, then id ASC.
+func (r *SyncRunEventRepository) ListSyncRunEvents(ctx context.Context, runID int) ([]domain.SyncRunEvent, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("sync run event repository is not initialized")
+	}
+
+	rows, err := r.db.QueryContext(ctx, `
+SELECT id, sync_run_id, created_at, level, message, details
+FROM sync_run_events
+WHERE sync_run_id = ?
+ORDER BY created_at ASC, id ASC
+`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("query sync run events: %w", err)
+	}
+	defer rows.Close()
+
+	events := []domain.SyncRunEvent{}
+	for rows.Next() {
+		var e domain.SyncRunEvent
+		if err := rows.Scan(&e.ID, &e.RunID, &e.CreatedAt, &e.Level, &e.Message, &e.Details); err != nil {
+			return nil, fmt.Errorf("scan sync run event: %w", err)
+		}
+		events = append(events, e)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sync run events: %w", err)
+	}
+
+	return events, nil
 }
