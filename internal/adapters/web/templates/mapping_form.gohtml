@@ -70,6 +70,17 @@
             <label for="youtube_playlist_id">
                 Playlist ID <span style="color:var(--red)">*</span>
             </label>
+            <select
+                id="youtube_playlist_id_select"
+                name="youtube_playlist_id_select"
+                onchange="toggleManualInput('youtube')"
+            >
+                <option value="" disabled selected>Select a playlist...</option>
+                {{range .YouTubePlaylists}}
+                <option value="{{.ID}}">{{.Title}}</option>
+                {{end}}
+                <option value="__manual__">Enter manually...</option>
+            </select>
             <input
                 type="text"
                 id="youtube_playlist_id"
@@ -77,6 +88,7 @@
                 required
                 autocomplete="off"
                 placeholder="PLxxxxxxxxxxxxxxxx"
+                style="display:none;"
             />
             <small style="color:var(--muted); line-height:1.4; display:block; margin-top:0.35rem; margin-bottom:0.75rem;">
                 Open the playlist on YouTube. The ID is the <code>list=</code> parameter in the URL —
@@ -108,6 +120,17 @@
             <label for="spotify_playlist_id">
                 Playlist ID <span style="color:var(--red)">*</span>
             </label>
+            <select
+                id="spotify_playlist_id_select"
+                name="spotify_playlist_id_select"
+                onchange="toggleManualInput('spotify')"
+            >
+                <option value="" disabled selected>Select a playlist...</option>
+                {{range .SpotifyPlaylists}}
+                <option value="{{.ID}}">{{.Title}}</option>
+                {{end}}
+                <option value="__manual__">Enter manually...</option>
+            </select>
             <input
                 type="text"
                 id="spotify_playlist_id"
@@ -115,6 +138,7 @@
                 required
                 autocomplete="off"
                 placeholder="37i9dQZF1DXxxxxxxx"
+                style="display:none;"
             />
             <small style="color:var(--muted); line-height:1.4; display:block; margin-top:0.35rem; margin-bottom:0.75rem;">
                 Open the playlist in Spotify. The ID is the last path segment of the URL —
@@ -141,4 +165,21 @@
         <a class="btn btn-ghost" href="/">Cancel</a>
     </div>
 </form>
+
+<script>
+    function toggleManualInput(prefix) {
+        const select = document.getElementById(prefix + '_playlist_id_select');
+        const manualInput = document.getElementById(prefix + '_playlist_id');
+        if (select.value === '__manual__') {
+            manualInput.style.display = 'block';
+            manualInput.required = true;
+        } else {
+            manualInput.style.display = 'none';
+            manualInput.required = false;
+            if (select.value) {
+                manualInput.value = select.value;
+            }
+        }
+    }
+</script>
 {{end}}

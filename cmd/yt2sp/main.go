@@ -73,7 +73,7 @@ func main() {
 	}()
 
 	mappingRepo := sqlite.NewMappingRepository(db)
-	webHandler, err := web.NewHandler(db, mappingRepo, cfg.OAuthBaseURL, cfg.YTClientID, cfg.YTSecret, cfg.SPClientID, cfg.SPSecret)
+	webHandler, err := web.NewHandler(db, mappingRepo, cfg.OAuthBaseURL, cfg.YTClientID, cfg.YTSecret, cfg.SPClientID, cfg.SPSecret, nil, nil)
 	if err != nil {
 		log.Fatalf("init web handler: %v", err)
 	}

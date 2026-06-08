@@ -372,6 +372,7 @@ func newTestHandler(t *testing.T, syncServices ...syncCommitter) (*sql.DB, *Hand
 		"test-yt-secret",
 		"test-sp-client-id",
 		"test-sp-secret",
+		nil, nil,
 		syncServices...,
 	)
 	if err != nil {
@@ -397,6 +398,7 @@ func newTestHandlerWithAsyncRunner(t *testing.T, db *sql.DB, runner asyncDryRunn
 		"test-yt-secret",
 		"test-sp-client-id",
 		"test-sp-secret",
+		nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
