@@ -361,10 +361,14 @@ func (h *Handler) createMappingForm(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var ytPlaylists, spPlaylists []ports.PlaylistSummary
 
-	g, gctx := errgroup.WithContext(ctx)
-	if h.ytService != nil {
+	ytService, spService, err := h.getPlaylistServices(ctx)
+	if err != nil {
+		// Continue with empty playlists - manual entry still works
+		slog.Warn("failed to initialize playlist services", "error", err)
+	} else {
+		g, gctx := errgroup.WithContext(ctx)
 		g.Go(func() error {
-			pl, err := h.ytService.ListUserPlaylists(gctx)
+			pl, err := ytService.ListUserPlaylists(gctx)
 			if err != nil {
 				slog.Warn("failed to fetch YouTube playlists", "error", err)
 				return nil
@@ -372,10 +376,8 @@ func (h *Handler) createMappingForm(w http.ResponseWriter, r *http.Request) {
 			ytPlaylists = pl
 			return nil
 		})
-	}
-	if h.spService != nil {
 		g.Go(func() error {
-			pl, err := h.spService.ListUserPlaylists(gctx)
+			pl, err := spService.ListUserPlaylists(gctx)
 			if err != nil {
 				slog.Warn("failed to fetch Spotify playlists", "error", err)
 				return nil
@@ -383,8 +385,8 @@ func (h *Handler) createMappingForm(w http.ResponseWriter, r *http.Request) {
 			spPlaylists = pl
 			return nil
 		})
+		_ = g.Wait()
 	}
-	_ = g.Wait()
 
 	h.render(w, "mapping_form.gohtml", mappingFormData{
 		Flash:             strings.TrimSpace(r.URL.Query().Get("flash")),
@@ -454,10 +456,13 @@ func (h *Handler) renderFormWithError(w http.ResponseWriter, r *http.Request, er
 	ctx := r.Context()
 	var ytPlaylists, spPlaylists []ports.PlaylistSummary
 
-	g, gctx := errgroup.WithContext(ctx)
-	if h.ytService != nil {
+	ytService, spService, err := h.getPlaylistServices(ctx)
+	if err != nil {
+		slog.Warn("failed to initialize playlist services", "error", err)
+	} else {
+		g, gctx := errgroup.WithContext(ctx)
 		g.Go(func() error {
-			pl, err := h.ytService.ListUserPlaylists(gctx)
+			pl, err := ytService.ListUserPlaylists(gctx)
 			if err != nil {
 				slog.Warn("failed to fetch YouTube playlists", "error", err)
 				return nil
@@ -465,10 +470,8 @@ func (h *Handler) renderFormWithError(w http.ResponseWriter, r *http.Request, er
 			ytPlaylists = pl
 			return nil
 		})
-	}
-	if h.spService != nil {
 		g.Go(func() error {
-			pl, err := h.spService.ListUserPlaylists(gctx)
+			pl, err := spService.ListUserPlaylists(gctx)
 			if err != nil {
 				slog.Warn("failed to fetch Spotify playlists", "error", err)
 				return nil
@@ -476,8 +479,8 @@ func (h *Handler) renderFormWithError(w http.ResponseWriter, r *http.Request, er
 			spPlaylists = pl
 			return nil
 		})
+		_ = g.Wait()
 	}
-	_ = g.Wait()
 
 	h.render(w, "mapping_form.gohtml", mappingFormData{
 		Error:            errMsg,
@@ -704,6 +707,23 @@ func (h *Handler) buildAsyncRunner(ctx context.Context) (asyncDryRunner, error) 
 		app.WithCandidateRepository(candidateRepo),
 		app.WithProgressReporter(&dbProgressReporter{eventRepo: h.eventRepo}),
 	), nil
+}
+
+// getPlaylistServices creates YouTube and Spotify service adapters on-demand
+// using fresh OAuth tokens from the database. Returns services and any error
+// encountered during token retrieval (services will be nil if error).
+func (h *Handler) getPlaylistServices(ctx context.Context) (ports.YouTubeService, ports.SpotifyService, error) {
+	ytToken, ytClient, err := h.getProviderTokenFresh(ctx, providerYouTube)
+	if err != nil {
+		slog.Warn("failed to get YouTube token for playlist fetch", "error", err)
+		return nil, nil, err
+	}
+	spToken, spClient, err := h.getProviderTokenFresh(ctx, providerSpotify)
+	if err != nil {
+		slog.Warn("failed to get Spotify token for playlist fetch", "error", err)
+		return nil, nil, err
+	}
+	return youtube.NewAdapter(ytClient, ytToken), spotify.NewAdapter(spClient, spToken), nil
 }
 
 // persistSyncItems inserts a sync_items row for each match returned by RunDry/RunDryInto.
