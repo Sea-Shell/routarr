@@ -169,16 +169,26 @@
 
 <script>
     function toggleManualInput(prefix) {
-        const select = document.getElementById(prefix + '_playlist_id_select');
+        const select      = document.getElementById(prefix + '_playlist_id_select');
         const manualInput = document.getElementById(prefix + '_playlist_id');
+        const titleInput  = document.getElementById(prefix + '_playlist_title');
+
         if (select.value === '__manual__') {
             manualInput.style.display = 'block';
             manualInput.required = true;
+            if (titleInput && titleInput.dataset.autofilled === '1') {
+                titleInput.value = '';
+                delete titleInput.dataset.autofilled;
+            }
         } else {
             manualInput.style.display = 'none';
             manualInput.required = false;
             if (select.value) {
                 manualInput.value = select.value;
+            }
+            if (titleInput && (!titleInput.value || titleInput.dataset.autofilled === '1')) {
+                titleInput.value = select.options[select.selectedIndex].text;
+                titleInput.dataset.autofilled = '1';
             }
         }
     }
