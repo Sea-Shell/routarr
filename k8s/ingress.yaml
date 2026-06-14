@@ -1,0 +1,26 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: routarr
+  namespace: seashell
+  annotations:
+    cert-manager.io/acme-challenge-type: http01
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    traefik.ingress.kubernetes.io/router.middlewares: seashell-routarr-auth@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: routarr.bateau.cloud
+      http:
+        paths:
+          - pathType: Prefix
+            path: "/"
+            backend:
+              service:
+                name: routarr
+                port:
+                  number: 8080
+  tls:
+    - hosts:
+        - routarr.bateau.cloud
+      secretName: routarr-tls

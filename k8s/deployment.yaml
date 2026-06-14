@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: routarr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: routarr
+  template:
+    metadata:
+      labels:
+        app: routarr
+    spec:
+      containers:
+        - name: routarr
+          image: registry.hub.docker.com/bateau/routarr:v2.1.0
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: routarr-config
+          volumeMounts:
+            - mountPath: /data
+              name: config
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - hostPath:
+            path: /data/disk2/opt/routarr
+            type: ""
+          name: config

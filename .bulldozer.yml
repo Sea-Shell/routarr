@@ -1,0 +1,4 @@
+---
+remote: Sea-Shell/seashell-configs
+path: bulldozer/bulldozer.yaml
+ref: main
