@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <radialGradient id="vg" cx="50%" cy="42%" r="62%">
+      <stop offset="0%" stop-color="#0c1a13"/><stop offset="60%" stop-color="#07100d"/><stop offset="100%" stop-color="#030907"/>
+    </radialGradient>
+    <clipPath id="d"><circle cx="512" cy="512" r="486"/></clipPath>
+    <filter id="b" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="13"/></filter>
+  </defs>
+  <circle cx="512" cy="512" r="486" fill="url(#vg)"/>
+  <g clip-path="url(#d)">
+    <!-- simplified terminals -->
+    <g transform="translate(300 290) rotate(10)"><path d="M -28 -32 L -28 32 L 33 0 Z" fill="#88a393"/></g>
+    <g transform="translate(694 786)"><rect x="-28.0" y="-28.0" width="12" height="56.0" rx="5" fill="#88a393"/>
+      <rect x="-6.0" y="-44.0" width="12" height="88.0" rx="5" fill="#88a393"/>
+      <rect x="16.0" y="-32.0" width="12" height="64.0" rx="5" fill="#88a393"/></g>
+    <!-- bold luminous trace -->
+    <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M 342 326 L 472 456 L 472 580 L 636 744" stroke="#8dff9a" stroke-width="26" opacity="0.35" filter="url(#b)"/>
+      <path d="M 342 326 L 472 456 L 472 580 L 636 744" stroke="#8dff9a" stroke-width="16"/>
+      <path d="M 342 326 L 472 456 L 472 580 L 636 744" stroke="#e8f6df" stroke-width="7"/>
+    </g>
+    <g>
+      <circle cx="472" cy="456" r="9" fill="#ffc857"/>
+      <circle cx="472" cy="580" r="9" fill="#ffc857"/>
+    </g>
+  </g>
+  <circle cx="512" cy="512" r="486" fill="none" stroke="#88a393" stroke-width="6"/>
+</svg>

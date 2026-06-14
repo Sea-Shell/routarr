@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024"
+     fill="none" stroke="currentColor" color="#88a393"
+     stroke-linecap="round" stroke-linejoin="round">
+  <!-- flat monochrome emblem: inherits text colour via currentColor -->
+  <circle cx="512" cy="512" r="490" stroke-width="10"/>
+  <circle cx="512" cy="512" r="468" stroke-width="3" opacity="0.45"/>
+
+  <!-- crosshair -->
+  <g stroke-width="6" opacity="0.7">
+    <line x1="492" y1="512" x2="532" y2="512"/>
+    <line x1="512" y1="492" x2="512" y2="532"/>
+  </g>
+
+  <!-- routed signal -->
+  <path d="M 342 326 L 472 456 L 472 580 L 636 744" stroke-width="22"/>
+
+  <!-- junction nodes (ringed dots) -->
+  <g stroke="none" fill="currentColor">
+    <circle cx="472" cy="456" r="13"/>
+    <circle cx="472" cy="580" r="13"/>
+  </g>
+  <g fill="#07100d" stroke="none">
+    <circle cx="472" cy="456" r="5"/>
+    <circle cx="472" cy="580" r="5"/>
+  </g>
+
+  <!-- terminals (solid) -->
+  <g fill="currentColor" stroke="none">
+    <g transform="translate(300 290) rotate(10)"><path d="M -25 -28 L -25 28 L 29 0 Z"/></g>
+    <g transform="translate(694 790)">
+      <rect x="-28.5" y="-30.0" width="9" height="60.0" rx="4"/>
+      <rect x="-4.5" y="-46.0" width="9" height="92.0" rx="4"/>
+      <rect x="19.5" y="-34.0" width="9" height="68.0" rx="4"/>
+    </g>
+  </g>
+</svg>

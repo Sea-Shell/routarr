@@ -1,4 +1,4 @@
-{{define "title"}}yt2sp — New Transfer Route{{end}}
+{{define "title"}}Routarr — {{if .Editing}}Edit{{else}}New{{end}} Transfer Route{{end}}
 
 {{define "content"}}
 <style>
@@ -31,10 +31,35 @@
         color: var(--muted);
     }
 
-    /* let inputs and selects fill the panel width */
     .route-side input[type="text"],
     .route-side select {
         max-width: 100%;
+    }
+
+    .schedule-input {
+        margin-top: 1.5rem;
+        padding-top: 1.25rem;
+        border-top: 1px solid var(--border);
+    }
+
+    .schedule-input input {
+        width: 100%;
+        max-width: 24rem;
+    }
+
+    .schedule-examples {
+        font-size: 0.78rem;
+        color: var(--muted);
+        margin-top: 0.35rem;
+        line-height: 1.5;
+    }
+
+    .schedule-examples code {
+        background: var(--panel-bg);
+        padding: 0.1rem 0.35rem;
+        border-radius: 2px;
+        font-size: 0.75rem;
+        white-space: nowrap;
     }
 
     @media (max-width: 620px) {
@@ -48,17 +73,17 @@
 </style>
 
 <p><a href="/">← Dashboard</a></p>
-<h1>New Transfer Route</h1>
+<h1>{{if .Editing}}Edit{{else}}New{{end}} Transfer Route</h1>
 
 <p style="color:var(--muted); font-size:0.85rem; margin-bottom:1.75rem;">
-    Specify the YouTube source playlist and the Spotify destination playlist.
-    A dry sync run will preview all matches before anything is committed.
+    {{if .Editing}}Update the source, destination, or sync schedule for this route.{{else}}Specify the YouTube source playlist and the Spotify destination playlist.
+    A dry sync run will preview all matches before anything is committed.{{end}}
 </p>
 
 {{if .Flash}}<p class="flash">{{.Flash}}</p>{{end}}
 {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
 
-<form method="post" action="/mappings">
+<form method="post" action="{{if .Editing}}/mappings/{{.MappingID}}{{else}}/mappings{{end}}">
     <div class="route-grid">
 
         <!-- ── Source ─────────────────────────────────────────── -->
@@ -76,9 +101,9 @@
                 name="youtube_playlist_id_select"
                 onchange="toggleManualInput('youtube')"
             >
-                <option value="" disabled selected>Select a playlist...</option>
+                <option value="" disabled {{if not .Editing}}selected{{end}}>Select a playlist...</option>
                 {{range .YouTubePlaylists}}
-                <option value="{{.ID}}">{{.Title}}</option>
+                <option value="{{.ID}}"{{if eq $.YTPlaylistID .ID}} selected{{end}}>{{.Title}}</option>
                 {{end}}
                 <option value="__manual__">Enter manually...</option>
             </select>
@@ -86,10 +111,11 @@
                 type="text"
                 id="youtube_playlist_id"
                 name="youtube_playlist_id"
-                required
                 autocomplete="off"
                 placeholder="PLxxxxxxxxxxxxxxxx"
-                style="display:none;"
+                value="{{.YTPlaylistID}}"
+                {{if not .Editing}}required{{end}}
+                style="{{if not .Editing}}display:none;{{end}}"
             />
             <small style="color:var(--muted); line-height:1.4; display:block; margin-top:0.35rem; margin-bottom:0.75rem;">
                 Open the playlist on YouTube. The ID is the <code>list=</code> parameter in the URL —
@@ -105,6 +131,7 @@
                 id="youtube_playlist_title"
                 name="youtube_playlist_title"
                 placeholder="e.g. My YouTube Mix"
+                value="{{.YTPlaylistTitle}}"
             />
         </div>
 
@@ -126,9 +153,9 @@
                 name="spotify_playlist_id_select"
                 onchange="toggleManualInput('spotify')"
             >
-                <option value="" disabled selected>Select a playlist...</option>
+                <option value="" disabled {{if not .Editing}}selected{{end}}>Select a playlist...</option>
                 {{range .SpotifyPlaylists}}
-                <option value="{{.ID}}">{{.Title}}</option>
+                <option value="{{.ID}}"{{if eq $.SPPlaylistID .ID}} selected{{end}}>{{.Title}}</option>
                 {{end}}
                 <option value="__manual__">Enter manually...</option>
             </select>
@@ -136,10 +163,11 @@
                 type="text"
                 id="spotify_playlist_id"
                 name="spotify_playlist_id"
-                required
                 autocomplete="off"
                 placeholder="37i9dQZF1DXxxxxxxx"
-                style="display:none;"
+                value="{{.SPPlaylistID}}"
+                {{if not .Editing}}required{{end}}
+                style="{{if not .Editing}}display:none;{{end}}"
             />
             <small style="color:var(--muted); line-height:1.4; display:block; margin-top:0.35rem; margin-bottom:0.75rem;">
                 Open the playlist in Spotify. The ID is the last path segment of the URL —
@@ -156,13 +184,38 @@
                 id="spotify_playlist_title"
                 name="spotify_playlist_title"
                 placeholder="e.g. My Spotify Mix"
+                value="{{.SPPlaylistTitle}}"
             />
         </div>
 
     </div>
 
+    <!-- ── Schedule ──────────────────────────────────────────── -->
+    <div class="panel schedule-input">
+        <label for="schedule">
+            Auto-Sync Schedule <span style="color:var(--muted)">(optional)</span>
+        </label>
+        <input
+            type="text"
+            id="schedule"
+            name="schedule"
+            placeholder="e.g. every day at 16"
+            value="{{.Schedule}}"
+            autocomplete="off"
+        />
+        <div class="schedule-examples">
+            Examples: <code>every day at 16</code> ·
+            <code>every monday at 09:00</code> ·
+            <code>once a week</code> ·
+            <code>every 3 hours</code> ·
+            <code>every hour</code>
+            <br>
+            Leave empty for manual-only sync.
+        </div>
+    </div>
+
     <div class="actions" style="margin-top:1.75rem;">
-        <button class="btn btn-primary" type="submit">Create Transfer Route</button>
+        <button class="btn btn-primary" type="submit">{{if .Editing}}Save Changes{{else}}Create Transfer Route{{end}}</button>
         <a class="btn btn-ghost" href="/">Cancel</a>
     </div>
 </form>
@@ -192,5 +245,26 @@
             }
         }
     }
+
+    // On edit, show manual input if the current ID doesn't match a select option.
+    document.addEventListener('DOMContentLoaded', function() {
+        ['youtube', 'spotify'].forEach(function(prefix) {
+            const select = document.getElementById(prefix + '_playlist_id_select');
+            const manualInput = document.getElementById(prefix + '_playlist_id');
+            if (manualInput && manualInput.value && select) {
+                let found = false;
+                for (let i = 0; i < select.options.length; i++) {
+                    if (select.options[i].value === manualInput.value) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found && manualInput.value) {
+                    select.value = '__manual__';
+                    manualInput.style.display = 'block';
+                }
+            }
+        });
+    });
 </script>
 {{end}}
