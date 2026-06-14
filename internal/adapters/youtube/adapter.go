@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bateau84/yt2sp/internal/domain"
-	"github.com/bateau84/yt2sp/internal/ports"
+	"github.com/bateau84/routarr/internal/domain"
+	"github.com/bateau84/routarr/internal/ports"
 )
 
 const (

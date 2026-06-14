@@ -1,14 +1,14 @@
 # AGENTS.md
 
 ## What this repo is
-`yt2sp` — a Go web app that syncs YouTube playlists to Spotify. Runs as an HTTP server, authenticates via OAuth, and persists everything in a local SQLite file.
+`Routarr` — a Go web app that syncs YouTube playlists to Spotify. Runs as an HTTP server, authenticates via OAuth, and persists everything in a local SQLite file.
 
 ## Commands
 
 ```bash
-make build   # go build -o bin/yt2sp ./cmd/yt2sp
+make build   # go build -o bin/routarr ./cmd/routarr
 make test    # go test -v ./...
-make run     # build + ./bin/yt2sp
+make run     # build + ./bin/routarr
 make clean   # rm -rf bin/
 ```
 
@@ -26,13 +26,13 @@ No linter config exists in the repo. `go vet ./...` is the only static check ava
 | Variable | Default | Notes |
 |---|---|---|
 | `ADDR` | `:8080` | Listen address |
-| `DB_PATH` | `yt2sp.db` | SQLite file path |
+| `DB_PATH` | `routarr.db` | SQLite file path |
 | `YT_CLIENT_ID` | _(required for OAuth)_ | Google Cloud Console |
 | `YT_SECRET` | _(required for OAuth)_ | Google Cloud Console |
 | `SP_CLIENT_ID` | _(required for OAuth)_ | Spotify Developer Dashboard |
 | `SP_SECRET` | _(required for OAuth)_ | Spotify Developer Dashboard |
 
-The `.env` file in the repo root contains only the defaults (`ADDR=:8080`, `DB_PATH=yt2sp.db`) — it is **not** auto-loaded. Export variables manually or use a tool like `dotenv`. OAuth credentials are not committed.
+The `.env` file in the repo root contains only the defaults (`ADDR=:8080`, `DB_PATH=routarr.db`) — it is **not** auto-loaded. Export variables manually or use a tool like `dotenv`. OAuth credentials are not committed.
 
 OAuth callback URLs are hardcoded to `http://localhost:8080/oauth/youtube/callback` and `http://localhost:8080/oauth/spotify/callback`. Your OAuth app registrations must use these exact redirect URIs.
 
@@ -41,7 +41,7 @@ OAuth callback URLs are hardcoded to `http://localhost:8080/oauth/youtube/callba
 Hexagonal (ports & adapters):
 
 ```
-cmd/yt2sp/main.go          — wires everything together
+cmd/routarr/main.go          — wires everything together
 internal/config/           — env-based config, no file loading
 internal/domain/           — pure value types (PlaylistMapping, SyncRun, TrackMatch, MatchDecision)
 internal/ports/            — interfaces: MappingRepository, MatchRepository, YouTubeService, SpotifyService

@@ -35,7 +35,7 @@ func GenerateSelfSignedCert(certFile, keyFile string) error {
 		SerialNumber: serial,
 		Subject: pkix.Name{
 			CommonName:   "localhost",
-			Organization: []string{"yt2sp dev"},
+			Organization: []string{"routarr dev"},
 		},
 		DNSNames: []string{"localhost"},
 		IPAddresses: []net.IP{

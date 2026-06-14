@@ -1,4 +1,4 @@
-module github.com/bateau84/yt2sp
+module github.com/bateau84/routarr
 
 go 1.26.3
 

@@ -1,4 +1,4 @@
-# yt2sp
+# Routarr
 
 A Go web app that syncs YouTube playlists to Spotify.  
 Runs as an HTTP server, authenticates via OAuth, and persists everything in a local SQLite file.
@@ -22,8 +22,8 @@ Runs as an HTTP server, authenticates via OAuth, and persists everything in a lo
 ## Quick start
 
 ```bash
-git clone https://github.com/bateau84/yt2sp
-cd yt2sp
+git clone https://github.com/bateau84/routarr
+cd routarr
 make build
 ```
 
@@ -58,7 +58,7 @@ Open `http://localhost:8080` in your browser.
 1. Go to [https://developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) and log in with your Spotify account.
 2. Click **Create app**.
 3. Fill in the form:
-   - **App name** — any name, e.g. `yt2sp`
+   - **App name** — any name, e.g. `Routarr`
    - **App description** — e.g. `YouTube to Spotify sync`
    - **Website** — can be left blank or set to `http://localhost:8080`
    - **Redirect URI** — enter the URI that matches how you run the app:
@@ -90,7 +90,7 @@ export SP_SECRET=your_client_secret_here
 
 1. Go to [https://console.cloud.google.com](https://console.cloud.google.com) and log in with your Google account.
 2. Click the project selector at the top of the page and choose **New project**.
-3. Give it a name (e.g. `yt2sp`) and click **Create**.
+3. Give it a name (e.g. `Routarr`) and click **Create**.
 
 ### 2. Enable the YouTube Data API v3
 
@@ -103,7 +103,7 @@ export SP_SECRET=your_client_secret_here
 1. Go to **APIs & Services → OAuth consent screen**.
 2. Choose **External** as the user type and click **Create**.
 3. Fill in the required fields:
-   - **App name** — e.g. `yt2sp`
+   - **App name** — e.g. `Routarr`
    - **User support email** — your Google account email
    - **Developer contact information** — your email again
 4. Click **Save and Continue** through the **Scopes** and **Test users** screens (no changes needed).
@@ -115,7 +115,7 @@ export SP_SECRET=your_client_secret_here
 1. Go to **APIs & Services → Credentials**.
 2. Click **+ Create Credentials → OAuth client ID**.
 3. Set **Application type** to **Web application**.
-4. Give it a name, e.g. `yt2sp-local`.
+4. Give it a name, e.g. `routarr-local`.
 5. Under **Authorized redirect URIs**, click **+ Add URI** and enter the URI that matches how you run the app:
    - Plain HTTP (default): `http://localhost:8080/oauth/youtube/callback`
    - HTTPS (when TLS is enabled — see [Local HTTPS development](#local-https-development)): `https://localhost:8080/oauth/youtube/callback`
@@ -138,7 +138,7 @@ export YT_SECRET=your_client_secret_here
 
 > **Tip:** Google trims `YT_CLIENT_ID` and `YT_SECRET` automatically, but make sure there is no trailing whitespace when you paste them. Spotify credentials (`SP_CLIENT_ID`, `SP_SECRET`) are **not** trimmed — trailing whitespace will cause auth failures.
 
-> **Tip:** If Google shows *"Access blocked: yt2sp has not completed the Google verification process"*, click **Advanced → Go to yt2sp (unsafe)**. This is expected for personal/testing apps that have not been submitted for review.
+> **Tip:** If Google shows *"Access blocked: Routarr has not completed the Google verification process"*, click **Advanced → Go to Routarr (unsafe)**. This is expected for personal/testing apps that have not been submitted for review.
 
 ---
 
@@ -147,7 +147,7 @@ export YT_SECRET=your_client_secret_here
 | Variable | Default | Required | Notes |
 |---|---|---|---|
 | `ADDR` | `:8080` | No | Listen address |
-| `DB_PATH` | `yt2sp.db` | No | SQLite file path |
+| `DB_PATH` | `routarr.db` | No | SQLite file path |
 | `YT_CLIENT_ID` | — | Yes | Google Cloud Console; leading/trailing whitespace is trimmed automatically |
 | `YT_SECRET` | — | Yes | Google Cloud Console; leading/trailing whitespace is trimmed automatically |
 | `SP_CLIENT_ID` | — | Yes | Spotify Developer Dashboard; whitespace is **not** trimmed — trailing spaces cause auth failures |
@@ -221,10 +221,10 @@ make build
 make run
 
 # Or run the binary directly
-./bin/yt2sp
+./bin/routarr
 ```
 
-The app starts at `http://localhost:8080`. On first run it will create `yt2sp.db` and apply all migrations automatically.
+The app starts at `http://localhost:8080`. On first run it will create `routarr.db` and apply all migrations automatically.
 
 To run tests:
 
@@ -240,7 +240,7 @@ go vet ./...       # static analysis
 Hexagonal (ports & adapters):
 
 ```
-cmd/yt2sp/main.go            — wires everything together
+cmd/routarr/main.go            — wires everything together
 internal/config/             — env-based config, no file loading
 internal/domain/             — pure value types (PlaylistMapping, SyncRun, TrackMatch, MatchDecision)
 internal/ports/              — interfaces: MappingRepository, MatchRepository, YouTubeService, SpotifyService

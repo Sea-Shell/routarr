@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bateau84/yt2sp/internal/adapters/sqlite"
-	"github.com/bateau84/yt2sp/internal/domain"
+	"github.com/bateau84/routarr/internal/adapters/sqlite"
+	"github.com/bateau84/routarr/internal/domain"
 )
 
 // TestConcurrentWritesNoDatabaseLocked verifies that WAL mode + busy_timeout
@@ -18,7 +18,7 @@ import (
 // - Background goroutine: INSERT sync_run_events (overlapping with status updates)
 func TestConcurrentWritesNoDatabaseLocked(t *testing.T) {
 	// Create temp db
-	f, err := os.CreateTemp("", "yt2sp_concurrent_*.db")
+	f, err := os.CreateTemp("", "routarr_concurrent_*.db")
 	if err != nil {
 		t.Fatalf("create temp db: %v", err)
 	}

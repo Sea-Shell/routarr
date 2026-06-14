@@ -20,7 +20,7 @@ type Config struct {
 func Load() *Config {
 	return &Config{
 		Addr:         getEnv("ADDR", ":8080"),
-		DBPath:       getEnv("DB_PATH", "yt2sp.db"),
+		DBPath:       getEnv("DB_PATH", "routarr.db"),
 		YTClientID:   strings.TrimSpace(os.Getenv("YT_CLIENT_ID")),
 		YTSecret:     strings.TrimSpace(os.Getenv("YT_SECRET")),
 		SPClientID:   strings.TrimSpace(os.Getenv("SP_CLIENT_ID")),
