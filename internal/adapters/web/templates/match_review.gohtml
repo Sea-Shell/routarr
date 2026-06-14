@@ -1,4 +1,4 @@
-{{define "title"}}yt2sp — Signal Resolution (Run #{{.RunID}}){{end}}
+{{define "title"}}Routarr — Signal Resolution (Run #{{.RunID}}){{end}}
 
 {{define "content"}}
 <style>
@@ -239,7 +239,8 @@
         flex-wrap: wrap;
     }
 
-    .badge-approved {
+    .badge-approved,
+    .badge-synced {
         display: inline-block;
         background: var(--green);
         color: var(--bg);
@@ -334,6 +335,7 @@
         <div class="review-card-header">
             <span>
                 Uncertain Match
+                {{if .IsSynced}}<span class="badge-synced">Previously synced</span>{{end}}
                 {{if .IsPriorChoice}}<span class="badge-prior">Using previous choice</span>{{end}}
             </span>
             <span class="review-card-conf">
