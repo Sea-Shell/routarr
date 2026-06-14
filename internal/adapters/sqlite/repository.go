@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/bateau84/yt2sp/internal/domain"
-	"github.com/bateau84/yt2sp/internal/ports"
+	"github.com/bateau84/routarr/internal/domain"
+	"github.com/bateau84/routarr/internal/ports"
 )
 
 var _ ports.MappingRepository = (*MappingRepository)(nil)
@@ -45,9 +45,10 @@ SET youtube_playlist_id = ?,
 	youtube_playlist_title = ?,
 	spotify_playlist_id = ?,
 	spotify_playlist_title = ?,
+	schedule = ?,
 	updated_at = ?
 WHERE id = ?
-`, m.YTPlaylistID, m.YTPlaylistTitle, m.SPPlaylistID, m.SPPlaylistTitle, m.UpdatedAt, m.ID)
+`, m.YTPlaylistID, m.YTPlaylistTitle, m.SPPlaylistID, m.SPPlaylistTitle, m.Schedule, m.UpdatedAt, m.ID)
 		if err != nil {
 			return fmt.Errorf("update playlist mapping: %w", err)
 		}
@@ -63,17 +64,23 @@ WHERE id = ?
 		return nil
 	}
 
+	var nextRun any
+	if m.NextScheduledRun != nil {
+		nextRun = m.NextScheduledRun.UTC()
+	}
 	res, err := r.db.ExecContext(ctx, `
 INSERT INTO playlist_mappings(
 	youtube_playlist_id,
 	youtube_playlist_title,
 	spotify_playlist_id,
 	spotify_playlist_title,
+	schedule,
+	next_scheduled_run,
 	created_at,
 	updated_at
 )
-VALUES(?, ?, ?, ?, ?, ?)
-`, m.YTPlaylistID, m.YTPlaylistTitle, m.SPPlaylistID, m.SPPlaylistTitle, m.CreatedAt, m.UpdatedAt)
+VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+`, m.YTPlaylistID, m.YTPlaylistTitle, m.SPPlaylistID, m.SPPlaylistTitle, m.Schedule, nextRun, m.CreatedAt, m.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("insert playlist mapping: %w", err)
 	}
@@ -93,18 +100,22 @@ func (r *MappingRepository) GetByID(ctx context.Context, id int) (*domain.Playli
 	}
 
 	row := r.db.QueryRowContext(ctx, `
-SELECT id, youtube_playlist_id, youtube_playlist_title, spotify_playlist_id, spotify_playlist_title, created_at, updated_at
+SELECT id, youtube_playlist_id, youtube_playlist_title, spotify_playlist_id, spotify_playlist_title,
+       COALESCE(schedule, ''), next_scheduled_run, created_at, updated_at
 FROM playlist_mappings
 WHERE id = ?
 `, id)
 
 	var mapping domain.PlaylistMapping
+	var nextScheduledRun sql.NullTime
 	if err := row.Scan(
 		&mapping.ID,
 		&mapping.YTPlaylistID,
 		&mapping.YTPlaylistTitle,
 		&mapping.SPPlaylistID,
 		&mapping.SPPlaylistTitle,
+		&mapping.Schedule,
+		&nextScheduledRun,
 		&mapping.CreatedAt,
 		&mapping.UpdatedAt,
 	); err != nil {
@@ -112,6 +123,10 @@ WHERE id = ?
 			return nil, nil
 		}
 		return nil, fmt.Errorf("get playlist mapping by id: %w", err)
+	}
+
+	if nextScheduledRun.Valid {
+		mapping.NextScheduledRun = &nextScheduledRun.Time
 	}
 
 	return &mapping, nil
@@ -123,7 +138,8 @@ func (r *MappingRepository) List(ctx context.Context) ([]domain.PlaylistMapping,
 	}
 
 	rows, err := r.db.QueryContext(ctx, `
-SELECT id, youtube_playlist_id, youtube_playlist_title, spotify_playlist_id, spotify_playlist_title, created_at, updated_at
+SELECT id, youtube_playlist_id, youtube_playlist_title, spotify_playlist_id, spotify_playlist_title,
+       COALESCE(schedule, ''), next_scheduled_run, created_at, updated_at
 FROM playlist_mappings
 ORDER BY id ASC
 `)
@@ -135,17 +151,25 @@ ORDER BY id ASC
 	var mappings []domain.PlaylistMapping
 	for rows.Next() {
 		var mapping domain.PlaylistMapping
+		var nextScheduledRun sql.NullTime
 		if err := rows.Scan(
 			&mapping.ID,
 			&mapping.YTPlaylistID,
 			&mapping.YTPlaylistTitle,
 			&mapping.SPPlaylistID,
 			&mapping.SPPlaylistTitle,
+			&mapping.Schedule,
+			&nextScheduledRun,
 			&mapping.CreatedAt,
 			&mapping.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan playlist mapping: %w", err)
 		}
+
+		if nextScheduledRun.Valid {
+			mapping.NextScheduledRun = &nextScheduledRun.Time
+		}
+
 		mappings = append(mappings, mapping)
 	}
 
@@ -221,7 +245,9 @@ SELECT
 	COALESCE(tm.spotify_track_title, ''),
 	COALESCE(tm.spotify_artist, ''),
 	COALESCE(tm.confidence, 0),
-	COALESCE(tm.decision, '')
+	COALESCE(tm.decision, ''),
+	tm.synced_at,
+	tm.resync_requested_at
 FROM sync_items si
 LEFT JOIN track_matches tm ON tm.youtube_video_id = si.youtube_video_id
 WHERE si.sync_run_id = ?
@@ -236,6 +262,8 @@ ORDER BY si.id ASC
 	for rows.Next() {
 		var m domain.TrackMatch
 		var decision string
+		var syncedAt sql.NullTime
+		var resyncRequestedAt sql.NullTime
 		if err := rows.Scan(
 			&m.YTVideoID,
 			&m.YTTitle,
@@ -244,10 +272,18 @@ ORDER BY si.id ASC
 			&m.SPArtist,
 			&m.Confidence,
 			&decision,
+			&syncedAt,
+			&resyncRequestedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan sync run match: %w", err)
 		}
 		m.Decision = domain.MatchDecision(decision)
+		if syncedAt.Valid {
+			m.SyncedAt = &syncedAt.Time
+		}
+		if resyncRequestedAt.Valid {
+			m.ResyncRequestedAt = &resyncRequestedAt.Time
+		}
 		matches = append(matches, m)
 	}
 
@@ -363,13 +399,65 @@ ON CONFLICT(youtube_video_id) DO UPDATE SET
 	return nil
 }
 
+// UpdateSyncedAt sets the synced_at timestamp for a track match.
+func (r *MatchRepository) UpdateSyncedAt(ctx context.Context, ytVideoID string, syncedAt time.Time) error {
+	if r == nil || r.db == nil {
+		return fmt.Errorf("match repository is not initialized")
+	}
+
+	res, err := r.db.ExecContext(ctx, `
+UPDATE track_matches
+SET synced_at = ?
+WHERE youtube_video_id = ?
+`, syncedAt.UTC(), ytVideoID)
+	if err != nil {
+		return fmt.Errorf("update synced_at: %w", err)
+	}
+
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update synced_at affected rows: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("track match for video %q not found", ytVideoID)
+	}
+
+	return nil
+}
+
+// UpdateResyncRequestedAt sets the resync_requested_at timestamp for a track match.
+func (r *MatchRepository) UpdateResyncRequestedAt(ctx context.Context, ytVideoID string, resyncAt time.Time) error {
+	if r == nil || r.db == nil {
+		return fmt.Errorf("match repository is not initialized")
+	}
+
+	res, err := r.db.ExecContext(ctx, `
+UPDATE track_matches
+SET resync_requested_at = ?
+WHERE youtube_video_id = ?
+`, resyncAt.UTC(), ytVideoID)
+	if err != nil {
+		return fmt.Errorf("update resync_requested_at: %w", err)
+	}
+
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update resync_requested_at affected rows: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("track match for video %q not found", ytVideoID)
+	}
+
+	return nil
+}
+
 func (r *MatchRepository) GetMatch(ctx context.Context, ytVideoID string) (*domain.TrackMatch, error) {
 	if r == nil || r.db == nil {
 		return nil, fmt.Errorf("match repository is not initialized")
 	}
 
 	row := r.db.QueryRowContext(ctx, `
-SELECT youtube_video_id, youtube_title, spotify_track_id, spotify_track_title, spotify_artist, confidence, decision, COALESCE(decision_source, '')
+SELECT youtube_video_id, youtube_title, spotify_track_id, spotify_track_title, spotify_artist, confidence, decision, COALESCE(decision_source, ''), synced_at, resync_requested_at
 FROM track_matches
 WHERE youtube_video_id = ?
 `, ytVideoID)
@@ -379,6 +467,8 @@ WHERE youtube_video_id = ?
 	var spTitle sql.NullString
 	var spArtist sql.NullString
 	var decision string
+	var syncedAt sql.NullTime
+	var resyncRequestedAt sql.NullTime
 
 	if err := row.Scan(
 		&match.YTVideoID,
@@ -389,6 +479,8 @@ WHERE youtube_video_id = ?
 		&match.Confidence,
 		&decision,
 		&match.DecisionSource,
+		&syncedAt,
+		&resyncRequestedAt,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -401,6 +493,12 @@ WHERE youtube_video_id = ?
 	match.SPTitle = spTitle.String
 	match.SPArtist = spArtist.String
 	match.Decision = domain.MatchDecision(decision)
+	if syncedAt.Valid {
+		match.SyncedAt = &syncedAt.Time
+	}
+	if resyncRequestedAt.Valid {
+		match.ResyncRequestedAt = &resyncRequestedAt.Time
+	}
 
 	return &match, nil
 }

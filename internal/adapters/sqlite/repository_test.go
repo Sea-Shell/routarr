@@ -6,14 +6,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bateau84/yt2sp/internal/domain"
+	"github.com/bateau84/routarr/internal/domain"
 )
 
 func TestOpenAndRunMigrations(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "yt2sp.db")
+	dbPath := filepath.Join(t.TempDir(), "routarr.db")
 
 	db, err := Open(dbPath)
 	if err != nil {
@@ -43,7 +43,7 @@ func TestMappingRepositoryCRUD(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "yt2sp.db")
+	dbPath := filepath.Join(t.TempDir(), "routarr.db")
 
 	db, err := Open(dbPath)
 	if err != nil {
@@ -135,7 +135,7 @@ func TestMatchRepositoryCRUD(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "yt2sp.db")
+	dbPath := filepath.Join(t.TempDir(), "routarr.db")
 
 	db, err := Open(dbPath)
 	if err != nil {
@@ -207,7 +207,7 @@ func TestSyncRunEventsTableExists(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "yt2sp.db")
+	dbPath := filepath.Join(t.TempDir(), "routarr.db")
 
 	db, err := Open(dbPath)
 	if err != nil {
@@ -254,7 +254,7 @@ func TestSyncRunEventRepository(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "yt2sp.db")
+	dbPath := filepath.Join(t.TempDir(), "routarr.db")
 
 	db, err := Open(dbPath)
 	if err != nil {
