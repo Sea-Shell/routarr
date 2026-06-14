@@ -133,6 +133,52 @@ CREATE TABLE IF NOT EXISTS sync_run_events (
 );
 CREATE INDEX IF NOT EXISTS idx_sync_run_events_sync_run_id ON sync_run_events(sync_run_id);`,
 	},
+	{
+		version: 10,
+		name:    "add_synced_tracking_to_track_matches",
+		query: `
+ALTER TABLE track_matches ADD COLUMN synced_at DATETIME;
+ALTER TABLE track_matches ADD COLUMN resync_requested_at DATETIME;
+CREATE INDEX IF NOT EXISTS idx_track_matches_synced_at ON track_matches(synced_at);`,
+	},
+	{
+		version: 12,
+		name:    "add_schedule_to_playlist_mappings",
+		query: `
+ALTER TABLE playlist_mappings ADD COLUMN schedule TEXT NOT NULL DEFAULT '';
+ALTER TABLE playlist_mappings ADD COLUMN next_scheduled_run DATETIME;`,
+	},
+	{
+		version: 13,
+		name:    "create_app_settings",
+		query: `
+CREATE TABLE IF NOT EXISTS app_settings (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);`,
+	},
+	{
+		version: 11,
+		name:    "backfill_synced_at_for_existing_adds",
+		query: `
+UPDATE track_matches
+SET synced_at = (
+	SELECT MAX(sr.finished_at)
+	FROM sync_items si
+	JOIN sync_runs sr ON sr.id = si.sync_run_id
+	WHERE si.youtube_video_id = track_matches.youtube_video_id
+	  AND si.action = 'added'
+	  AND sr.status = 'completed'
+)
+WHERE EXISTS (
+	SELECT 1
+	FROM sync_items si
+	JOIN sync_runs sr ON sr.id = si.sync_run_id
+	WHERE si.youtube_video_id = track_matches.youtube_video_id
+	  AND si.action = 'added'
+	  AND sr.status = 'completed'
+);`,
+	},
 }
 
 func Open(path string) (*sql.DB, error) {
