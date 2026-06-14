@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bateau84/yt2sp/internal/adapters/sqlite"
-	"github.com/bateau84/yt2sp/internal/domain"
+	"github.com/bateau84/routarr/internal/adapters/sqlite"
+	"github.com/bateau84/routarr/internal/domain"
 	"golang.org/x/oauth2"
 )
 
@@ -353,7 +353,7 @@ func TestOAuthConnectFlow(t *testing.T) {
 func newTestHandler(t *testing.T, syncServices ...syncCommitter) (*sql.DB, *Handler, *http.ServeMux) {
 	t.Helper()
 
-	dbPath := filepath.Join(t.TempDir(), "yt2sp-web.db")
+	dbPath := filepath.Join(t.TempDir(), "routarr-web.db")
 	db, err := sqlite.Open(dbPath)
 	if err != nil {
 		t.Fatalf("open sqlite db: %v", err)

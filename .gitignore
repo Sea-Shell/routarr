@@ -18,6 +18,8 @@ vendor/
 # SQLite artifacts
 *.db
 *.db-journal
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 
@@ -29,3 +31,9 @@ vendor/
 .DS_Store
 .idea/
 .vscode/
+
+# misc
+.playwrite-logs/
+key.pem
+cert.pem
+docs/superpowers/
