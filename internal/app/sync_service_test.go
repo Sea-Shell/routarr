@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bateau84/yt2sp/internal/domain"
-	"github.com/bateau84/yt2sp/internal/ports"
+	"github.com/bateau84/routarr/internal/domain"
+	"github.com/bateau84/routarr/internal/ports"
 )
 
 func TestRunDrySkipsPreviouslyRejected(t *testing.T) {
@@ -375,6 +375,14 @@ func (s *matchRepoStub) UpdateMatchChoice(ctx context.Context, ytVideoID, spTrac
 		m.Decision = decision
 		m.DecisionSource = "user"
 	}
+	return nil
+}
+
+func (s *matchRepoStub) UpdateSyncedAt(ctx context.Context, ytVideoID string, syncedAt time.Time) error {
+	return nil
+}
+
+func (s *matchRepoStub) UpdateResyncRequestedAt(ctx context.Context, ytVideoID string, resyncAt time.Time) error {
 	return nil
 }
 
