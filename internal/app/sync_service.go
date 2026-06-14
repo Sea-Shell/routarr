@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bateau84/yt2sp/internal/domain"
-	"github.com/bateau84/yt2sp/internal/ports"
+	"github.com/bateau84/routarr/internal/domain"
+	"github.com/bateau84/routarr/internal/ports"
 )
 
 const syncRunStatusPending = "pending"
@@ -18,9 +18,10 @@ const (
 	syncRunStatusRunning           = "running"
 	syncRunStatusCompleted         = "completed"
 	syncRunStatusFailed            = "failed"
-	syncItemActionAdded            = "added"
-	syncItemActionSkippedDuplicate = "skipped_duplicate"
-	syncItemActionFailed           = "failed"
+	syncItemActionAdded              = "added"
+	syncItemActionSkippedDuplicate   = "skipped_duplicate"
+	syncItemActionRemovedFromPlaylist = "removed_from_playlist"
+	syncItemActionFailed             = "failed"
 )
 
 // maxCandidates is the number of Spotify search results to fetch and store
@@ -256,6 +257,15 @@ func (s *SyncService) resolveMatch(ctx context.Context, runID int, video domain.
 		if existing.Decision == domain.MatchRejected {
 			return nil, nil
 		}
+
+		// If track was previously synced to Spotify, include it in the run
+		// (so the UI can show the synced visual) but it will be skipped during commit.
+		if existing.SyncedAt != nil && (existing.ResyncRequestedAt == nil || existing.ResyncRequestedAt.Before(*existing.SyncedAt)) {
+			s.reportProgress(ctx, runID, "info", fmt.Sprintf("Already-synced video: %s", video.YTVideoID))
+			existing.IsPriorChoice = existing.DecisionSource == "user"
+			return existing, nil
+		}
+
 		// Mark as prior choice only for saved manual decisions (decision_source="user").
 		// Auto-approved matches from prior runs should not show the "Using previous choice" badge.
 		existing.IsPriorChoice = existing.DecisionSource == "user"
@@ -383,6 +393,31 @@ func (s *SyncService) Commit(ctx context.Context, syncRunID int) error {
 			continue
 		}
 
+		// Previously synced tracks: check if still in the playlist (unless user
+		// explicitly requested a re-sync, which allows re-processing).
+		if item.SyncedAt != nil && (item.ResyncRequestedAt == nil || item.ResyncRequestedAt.Before(*item.SyncedAt)) {
+			trackID := strings.TrimSpace(item.SPTrackID)
+			if trackID != "" {
+				if _, inPlaylist := existing[trackID]; !inPlaylist {
+					// Was synced before but removed from the playlist.
+					if updateErr := s.syncRunRepo.UpdateSyncItemAction(ctx, run.ID, item.YTVideoID, syncItemActionRemovedFromPlaylist, "was removed from Spotify playlist"); updateErr != nil {
+						return fmt.Errorf("mark sync item %q removed: %w", item.YTVideoID, updateErr)
+					}
+					continue
+				}
+			}
+			// Still in the playlist (or no track ID to check).
+			if updateErr := s.syncRunRepo.UpdateSyncItemAction(ctx, run.ID, item.YTVideoID, syncItemActionSkippedDuplicate, "already synced in a previous run"); updateErr != nil {
+				return fmt.Errorf("mark sync item %q skipped duplicate: %w", item.YTVideoID, updateErr)
+			}
+			if s.matchRepo != nil {
+				if syncErr := s.matchRepo.UpdateSyncedAt(ctx, item.YTVideoID, time.Now().UTC()); syncErr != nil {
+					slog.Warn("failed to update synced_at for duplicate track", "video_id", item.YTVideoID, "error", syncErr)
+				}
+			}
+			continue
+		}
+
 		trackID := strings.TrimSpace(item.SPTrackID)
 		if trackID == "" {
 			if updateErr := s.syncRunRepo.UpdateSyncItemAction(ctx, run.ID, item.YTVideoID, syncItemActionFailed, "spotify track id is empty"); updateErr != nil {
@@ -397,6 +432,13 @@ func (s *SyncService) Commit(ctx context.Context, syncRunID int) error {
 			if updateErr := s.syncRunRepo.UpdateSyncItemAction(ctx, run.ID, item.YTVideoID, syncItemActionSkippedDuplicate, ""); updateErr != nil {
 				return fmt.Errorf("mark sync item %q skipped duplicate: %w", item.YTVideoID, updateErr)
 			}
+			// Track is effectively synced (already in the playlist), so record that
+			// so subsequent dry runs skip it and show the "synced" visual indicator.
+			if s.matchRepo != nil {
+				if syncErr := s.matchRepo.UpdateSyncedAt(ctx, item.YTVideoID, time.Now().UTC()); syncErr != nil {
+					slog.Warn("failed to update synced_at for duplicate track", "video_id", item.YTVideoID, "error", syncErr)
+				}
+			}
 			continue
 		}
 
@@ -410,6 +452,11 @@ func (s *SyncService) Commit(ctx context.Context, syncRunID int) error {
 		existing[trackID] = struct{}{}
 		if updateErr := s.syncRunRepo.UpdateSyncItemAction(ctx, run.ID, item.YTVideoID, syncItemActionAdded, ""); updateErr != nil {
 			return fmt.Errorf("mark sync item %q added: %w", item.YTVideoID, updateErr)
+		}
+		if s.matchRepo != nil {
+			if syncErr := s.matchRepo.UpdateSyncedAt(ctx, item.YTVideoID, time.Now().UTC()); syncErr != nil {
+				slog.Warn("failed to update synced_at for track", "video_id", item.YTVideoID, "error", syncErr)
+			}
 		}
 	}
 
