@@ -1,0 +1,100 @@
+name: "Release, build, push and deploy"
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *"
+  push:
+    branches:
+      - "main"
+
+env:
+  IMAGE_REGISTRY: registry.hub.docker.com
+  IMAGE_REPOSITORY: bateau
+  IMAGE_NAME: routarr
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: release
+    uses: nrkno/github-workflow-semantic-release/.github/workflows/workflow.yaml@6130bdf606c18e7221c4235296a004d841762c66 # v4.12.0
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
+    with:
+      runs-on: ubuntu-latest
+      release-enabled: true
+      lint-enabled: false
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build_push.outputs.digest }}
+    needs: release
+    steps:
+      - name: checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: refs/tags/${{ needs.release.outputs.git-tag }}
+          fetch-depth: 0
+      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ${{ env.IMAGE_REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+      - name: Build and push
+        id: build_push
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true
+          tags: |
+            ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ needs.release.outputs.release-version }}
+            ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}/${{ env.IMAGE_NAME }}:latest
+  deploy:
+    runs-on: [ubuntu-latest]
+    needs: [release, build]
+    permissions:
+      id-token: write
+      actions: read
+      contents: read
+    steps:
+      # Checkout repo code
+      - name: Checkout repo with tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        if: ${{ needs.release.outputs.new-release-published == 'true' }}
+        with:
+          ref: refs/tags/${{ needs.release.outputs.git-tag }}
+      - name: Checkout repo without tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        if: ${{ needs.release.outputs.new-release-published != 'true' }}
+      - name: Kubeconfig context
+        uses: azure/k8s-set-context@89b837d75b40a7bd2ddafde837473c212db8b313 # v5
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.K8S_KONFIG }}
+      - name: Tailscale
+        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
+        with:
+          oauth-client-id: ${{ secrets.TS_ACTION_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_ACTION_CLIENT_SECRET }}
+          tags: tag:github
+      # Do the deploy on K8s cluster set in the above context
+      - name: Deply manifests to k8s
+        uses: azure/k8s-deploy@c7ebd0d5f39477a23f1b5dea0f52e6db04adf28e # v6
+        timeout-minutes: 15
+        with:
+          action: deploy
+          namespace: seashell
+          annotate-namespace: false
+          strategy: basic
+          manifests: |
+            k8s/
+          images: |
+            ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ needs.release.outputs.git-tag }}@${{ needs.build.outputs.digest }}

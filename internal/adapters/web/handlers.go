@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"embed"
 	"encoding/base64"
+	"io/fs"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,13 +18,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bateau84/yt2sp/internal/adapters/spotify"
-	"github.com/bateau84/yt2sp/internal/adapters/sqlite"
-	"github.com/bateau84/yt2sp/internal/adapters/youtube"
-	"github.com/bateau84/yt2sp/internal/app"
-	"github.com/bateau84/yt2sp/internal/domain"
-	"github.com/bateau84/yt2sp/internal/matcher"
-	"github.com/bateau84/yt2sp/internal/ports"
+	"github.com/bateau84/routarr/internal/adapters/spotify"
+	"github.com/bateau84/routarr/internal/adapters/sqlite"
+	"github.com/bateau84/routarr/internal/adapters/youtube"
+	"github.com/bateau84/routarr/internal/app"
+	"github.com/bateau84/routarr/internal/domain"
+	"github.com/bateau84/routarr/internal/matcher"
+	"github.com/bateau84/routarr/internal/ports"
+	"github.com/bateau84/routarr/internal/scheduler"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"golang.org/x/sync/errgroup"
@@ -34,6 +36,10 @@ const (
 	providerYouTube = "youtube"
 	providerSpotify = "spotify"
 )
+
+// faviconPaths lists icon files to serve at /favicon.ico.
+// First file found is served.
+var faviconPaths = []string{"static/routarr-favicon.ico", "static/routarr-favicon.svg", "static/favicon.ico", "static/favicon.svg"}
 
 // Dry-run lifecycle statuses used when the web handler creates or updates sync runs.
 // These must match the status values used in the app layer and stored in the DB.
@@ -46,12 +52,17 @@ const (
 //go:embed templates/*.gohtml
 var templateFS embed.FS
 
+//go:embed static
+var staticFS embed.FS
+
 type Handler struct {
 	db            *sql.DB
 	mappingRepo   ports.MappingRepository
 	matchRepo     ports.MatchRepository
 	candidateRepo ports.CandidateRepository
 	eventRepo     ports.SyncRunEventRepository
+	settingsRepo  ports.SettingsRepository
+	settings      *domain.UserSettings
 	syncService   syncCommitter
 	ytService     ports.YouTubeService
 	spService     ports.SpotifyService
@@ -109,6 +120,13 @@ type indexMappingView struct {
 }
 
 type mappingFormData struct {
+	Editing           bool   // true when editing an existing mapping
+	MappingID         int
+	YTPlaylistID      string
+	YTPlaylistTitle   string
+	SPPlaylistID      string
+	SPPlaylistTitle   string
+	Schedule          string
 	Flash             string
 	Error             string
 	YouTubePlaylists  []ports.PlaylistSummary
@@ -120,21 +138,44 @@ type syncRunView struct {
 	MappingID           int
 	MappingYouTubeTitle string
 	MappingSpotifyTitle string
+	MappingSpotifyID    string
 	StartedAt           time.Time
 	FinishedAt          *time.Time
 	Status              string
 }
 
 type syncItemView struct {
-	YouTubeVideoID string
-	YouTubeTitle   string
-	SpotifyTrackID string
-	SpotifyTitle   string
-	SpotifyArtist  string
-	Confidence     float64
-	Decision       string
-	Action         string
-	Error          string
+	YouTubeVideoID      string
+	YouTubeTitle        string
+	SpotifyTrackID      string
+	SpotifyTitle        string
+	SpotifyArtist       string
+	Confidence          float64
+	Decision            string
+	Action              string
+	Error               string
+	SyncedAt            *time.Time
+	ResyncRequestedAt   *time.Time
+	MissingFromPlaylist bool // true when synced track's Spotify ID no longer in playlist
+}
+
+func (v syncItemView) IsSynced() bool {
+	return v.SyncedAt != nil
+}
+
+func (v syncItemView) CanResync() bool {
+	return v.IsSynced() &&
+		(v.Decision == string(domain.MatchAuto) || v.Decision == string(domain.MatchApproved)) &&
+		!v.isAddedInCurrentRun()
+}
+
+func (v syncItemView) isAddedInCurrentRun() bool {
+	return v.Action == "added"
+}
+
+type settingsViewData struct {
+	TimeFormat string
+	Flash      string
 }
 
 type syncDetailData struct {
@@ -142,6 +183,7 @@ type syncDetailData struct {
 	Items        []syncItemView
 	PendingCount int
 	Flash        string
+	TimeFormat   string
 }
 
 type reviewItemView struct {
@@ -156,8 +198,14 @@ type reviewItemView struct {
 	Decision       string
 	IsPriorChoice  bool
 	IsAutoMatch    bool // true when decision="auto"; controls initial expand state of alternatives
+	// SyncedAt is set when this track was previously synced to Spotify.
+	SyncedAt *time.Time
 	// Candidates holds the top alternative matches from the current run.
 	Candidates []candidateView
+}
+
+func (v reviewItemView) IsSynced() bool {
+	return v.SyncedAt != nil
 }
 
 func (v reviewItemView) IsResolved() bool {
@@ -241,6 +289,7 @@ func NewHandler(db *sql.DB, mappingRepo ports.MappingRepository, oauthBaseURL, y
 		"sync_detail.gohtml",
 		"match_review.gohtml",
 		"sync_progress.gohtml",
+		"settings.gohtml",
 	}
 	tmpls := make(map[string]*template.Template, len(pages))
 	for _, page := range pages {
@@ -251,12 +300,20 @@ func NewHandler(db *sql.DB, mappingRepo ports.MappingRepository, oauthBaseURL, y
 		tmpls[page] = t
 	}
 
+	settingsRepo := sqlite.NewSettingsRepository(db)
+	settings, err := settingsRepo.Load(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("load settings: %w", err)
+	}
+
 	return &Handler{
 		db:            db,
 		mappingRepo:   mappingRepo,
 		matchRepo:     sqlite.NewMatchRepository(db),
 		candidateRepo: sqlite.NewCandidateRepository(db),
 		eventRepo:     sqlite.NewSyncRunEventRepository(db),
+		settingsRepo:  settingsRepo,
+		settings:      settings,
 		syncService:   syncService,
 		ytService:     ytService,
 		spService:     spService,
@@ -293,6 +350,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /", h.index)
 	mux.HandleFunc("GET /mappings/new", h.createMappingForm)
 	mux.HandleFunc("POST /mappings", h.createMapping)
+	mux.HandleFunc("GET /mappings/{id}/edit", h.editMappingForm)
+	mux.HandleFunc("POST /mappings/{id}", h.updateMapping)
 	mux.HandleFunc("POST /mappings/{id}/sync", h.runDrySync)
 	mux.HandleFunc("POST /mappings/{id}/delete", h.deleteMapping)
 	mux.HandleFunc("GET /runs/{id}", h.syncDetail)
@@ -303,8 +362,17 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /runs/{id}/review/{decision}", h.updateMatchDecision)
 	// pick allows choosing an alternative candidate as "use once" (run-scoped) or "remember" (global).
 	mux.HandleFunc("POST /runs/{id}/review/pick", h.pickCandidate)
+	mux.HandleFunc("POST /runs/{id}/resync", h.requestResync)
 	mux.HandleFunc("GET /oauth/{provider}/connect", h.oauthConnect)
 	mux.HandleFunc("GET /oauth/{provider}/callback", h.oauthCallback)
+	mux.HandleFunc("GET /favicon.ico", h.favicon)
+	staticFSRoot, err := fs.Sub(staticFS, "static")
+	if err != nil {
+		panic(err)
+	}
+	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFSRoot))))
+	mux.HandleFunc("GET /settings", h.showSettings)
+	mux.HandleFunc("POST /settings", h.saveSettings)
 }
 
 func (h *Handler) index(w http.ResponseWriter, r *http.Request) {
@@ -422,10 +490,18 @@ func (h *Handler) createMapping(w http.ResponseWriter, r *http.Request) {
 
 	ytTitle := strings.TrimSpace(r.FormValue("youtube_playlist_title"))
 	spTitle := strings.TrimSpace(r.FormValue("spotify_playlist_title"))
+	schedule := strings.TrimSpace(r.FormValue("schedule"))
 
 	if ytID == "" || spID == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		h.renderFormWithError(w, r, "YouTube playlist ID and Spotify playlist ID are required.")
+		h.renderFormWithError(w, r, mappingFormData{
+			YTPlaylistID:    ytID,
+			YTPlaylistTitle: ytTitle,
+			SPPlaylistID:    spID,
+			SPPlaylistTitle: spTitle,
+			Schedule:        schedule,
+			Error:           "YouTube playlist ID and Spotify playlist ID are required.",
+		})
 		return
 	}
 
@@ -441,18 +517,34 @@ func (h *Handler) createMapping(w http.ResponseWriter, r *http.Request) {
 		YTPlaylistTitle: ytTitle,
 		SPPlaylistID:    spID,
 		SPPlaylistTitle: spTitle,
+		Schedule:        schedule,
+	}
+
+	// Initialize next scheduled run if schedule is set.
+	if mapping.Schedule != "" {
+		if sched, err := scheduler.ParseSchedule(mapping.Schedule); err == nil {
+			next := sched.NextAfter(time.Now().UTC())
+			mapping.NextScheduledRun = &next
+		}
 	}
 
 	if err := h.mappingRepo.Save(r.Context(), mapping); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		h.renderFormWithError(w, r, fmt.Sprintf("save mapping: %v", err))
+		h.renderFormWithError(w, r, mappingFormData{
+			YTPlaylistID:    ytID,
+			YTPlaylistTitle: ytTitle,
+			SPPlaylistID:    spID,
+			SPPlaylistTitle: spTitle,
+			Schedule:        schedule,
+			Error:           fmt.Sprintf("save mapping: %v", err),
+		})
 		return
 	}
 
 	http.Redirect(w, r, "/?flash=Mapping+created", http.StatusSeeOther)
 }
 
-func (h *Handler) renderFormWithError(w http.ResponseWriter, r *http.Request, errMsg string) {
+func (h *Handler) renderFormWithError(w http.ResponseWriter, r *http.Request, fd mappingFormData) {
 	ctx := r.Context()
 	var ytPlaylists, spPlaylists []ports.PlaylistSummary
 
@@ -482,11 +574,9 @@ func (h *Handler) renderFormWithError(w http.ResponseWriter, r *http.Request, er
 		_ = g.Wait()
 	}
 
-	h.render(w, "mapping_form.gohtml", mappingFormData{
-		Error:            errMsg,
-		YouTubePlaylists: ytPlaylists,
-		SpotifyPlaylists: spPlaylists,
-	})
+	fd.YouTubePlaylists = ytPlaylists
+	fd.SpotifyPlaylists = spPlaylists
+	h.render(w, "mapping_form.gohtml", fd)
 }
 
 func (h *Handler) deleteMapping(w http.ResponseWriter, r *http.Request) {
@@ -515,6 +605,169 @@ func (h *Handler) deleteMapping(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/?flash=Mapping+deleted", http.StatusSeeOther)
 }
 
+func (h *Handler) editMappingForm(w http.ResponseWriter, r *http.Request) {
+	mappingID, ok := parsePathInt(r.PathValue("id"))
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	mapping, err := h.mappingRepo.GetByID(r.Context(), mappingID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("load mapping: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if mapping == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	ctx := r.Context()
+	var ytPlaylists, spPlaylists []ports.PlaylistSummary
+	ytService, spService, err := h.getPlaylistServices(ctx)
+	if err != nil {
+		slog.Warn("failed to initialize playlist services", "error", err)
+	} else {
+		g, gctx := errgroup.WithContext(ctx)
+		g.Go(func() error {
+			pl, err := ytService.ListUserPlaylists(gctx)
+			if err != nil {
+				slog.Warn("failed to fetch YouTube playlists", "error", err)
+				return nil
+			}
+			ytPlaylists = pl
+			return nil
+		})
+		g.Go(func() error {
+			pl, err := spService.ListUserPlaylists(gctx)
+			if err != nil {
+				slog.Warn("failed to fetch Spotify playlists", "error", err)
+				return nil
+			}
+			spPlaylists = pl
+			return nil
+		})
+		_ = g.Wait()
+	}
+
+	var schedule string
+	if mapping.Schedule != "" {
+		schedule = mapping.Schedule
+	}
+
+	h.render(w, "mapping_form.gohtml", mappingFormData{
+		Editing:          true,
+		MappingID:        mapping.ID,
+		YTPlaylistID:     mapping.YTPlaylistID,
+		YTPlaylistTitle:  mapping.YTPlaylistTitle,
+		SPPlaylistID:     mapping.SPPlaylistID,
+		SPPlaylistTitle:  mapping.SPPlaylistTitle,
+		Schedule:         schedule,
+		Flash:            strings.TrimSpace(r.URL.Query().Get("flash")),
+		YouTubePlaylists: ytPlaylists,
+		SpotifyPlaylists: spPlaylists,
+	})
+}
+
+func (h *Handler) updateMapping(w http.ResponseWriter, r *http.Request) {
+	mappingID, ok := parsePathInt(r.PathValue("id"))
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, fmt.Sprintf("parse form: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	ytSelect := strings.TrimSpace(r.FormValue("youtube_playlist_id_select"))
+	spSelect := strings.TrimSpace(r.FormValue("spotify_playlist_id_select"))
+
+	ytID := ytSelect
+	if ytSelect == "__manual__" {
+		ytID = strings.TrimSpace(r.FormValue("youtube_playlist_id"))
+	} else if ytSelect == "" {
+		ytID = strings.TrimSpace(r.FormValue("youtube_playlist_id"))
+	}
+
+	spID := spSelect
+	if spSelect == "__manual__" {
+		spID = strings.TrimSpace(r.FormValue("spotify_playlist_id"))
+	} else if spSelect == "" {
+		spID = strings.TrimSpace(r.FormValue("spotify_playlist_id"))
+	}
+
+	ytTitle := strings.TrimSpace(r.FormValue("youtube_playlist_title"))
+	spTitle := strings.TrimSpace(r.FormValue("spotify_playlist_title"))
+	schedule := strings.TrimSpace(r.FormValue("schedule"))
+
+	if ytID == "" || spID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		h.renderFormWithError(w, r, mappingFormData{
+			YTPlaylistID:    ytID,
+			YTPlaylistTitle: ytTitle,
+			SPPlaylistID:    spID,
+			SPPlaylistTitle: spTitle,
+			Schedule:        schedule,
+			Editing:         true,
+			MappingID:       mappingID,
+			Error:           "YouTube playlist ID and Spotify playlist ID are required.",
+		})
+		return
+	}
+
+	if ytTitle == "" {
+		ytTitle = ytID
+	}
+	if spTitle == "" {
+		spTitle = spID
+	}
+
+	mapping, err := h.mappingRepo.GetByID(r.Context(), mappingID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("load mapping: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if mapping == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	mapping.YTPlaylistID = ytID
+	mapping.YTPlaylistTitle = ytTitle
+	mapping.SPPlaylistID = spID
+	mapping.SPPlaylistTitle = spTitle
+	mapping.Schedule = schedule
+
+	// Reset next_scheduled_run when schedule changes so the scheduler picks it up.
+	if mapping.Schedule != "" {
+		if sched, err := scheduler.ParseSchedule(mapping.Schedule); err == nil {
+			next := sched.NextAfter(time.Now().UTC())
+			mapping.NextScheduledRun = &next
+		}
+	} else {
+		mapping.NextScheduledRun = nil
+	}
+
+	if err := h.mappingRepo.Save(r.Context(), mapping); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		h.renderFormWithError(w, r, mappingFormData{
+			YTPlaylistID:    ytID,
+			YTPlaylistTitle: ytTitle,
+			SPPlaylistID:    spID,
+			SPPlaylistTitle: spTitle,
+			Schedule:        schedule,
+			Editing:         true,
+			MappingID:       mappingID,
+			Error:           fmt.Sprintf("save mapping: %v", err),
+		})
+		return
+	}
+
+	http.Redirect(w, r, "/?flash=Mapping+updated", http.StatusSeeOther)
+}
+
 func (h *Handler) syncDetail(w http.ResponseWriter, r *http.Request) {
 	runID, ok := parsePathInt(r.PathValue("id"))
 	if !ok {
@@ -538,6 +791,14 @@ func (h *Handler) syncDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check which previously synced tracks are still in the Spotify playlist.
+	// This requires one API call per page load (only when synced tracks exist).
+	if playlistCheckDone, playlistErr := h.checkPlaylistPresence(r.Context(), items, run.MappingSpotifyID); playlistErr != nil {
+		slog.Warn("failed to check playlist presence", "run_id", runID, "error", playlistErr)
+	} else if playlistCheckDone {
+		slog.Debug("checked playlist presence for synced tracks", "run_id", runID)
+	}
+
 	pendingCount, err := h.countPendingItems(r.Context(), runID)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("count pending matches: %v", err), http.StatusInternalServerError)
@@ -549,6 +810,7 @@ func (h *Handler) syncDetail(w http.ResponseWriter, r *http.Request) {
 		Items:        items,
 		PendingCount: pendingCount,
 		Flash:        strings.TrimSpace(r.URL.Query().Get("flash")),
+		TimeFormat:   h.settings.TimeFormat,
 	})
 }
 
@@ -726,6 +988,56 @@ func (h *Handler) getPlaylistServices(ctx context.Context) (ports.YouTubeService
 	return youtube.NewAdapter(ytClient, ytToken), spotify.NewAdapter(spClient, spToken), nil
 }
 
+// checkPlaylistPresence checks which synced tracks' Spotify IDs are still present
+// in the destination playlist. If any synced tracks exist, it makes ONE Spotify
+// API call to fetch the playlist, then sets MissingFromPlaylist on matching items.
+// Returns (true, nil) if a check was performed, (false, nil) if no synced tracks
+// to check, or (false, err) on failure.
+func (h *Handler) checkPlaylistPresence(ctx context.Context, items []syncItemView, spPlaylistID string) (bool, error) {
+	if spPlaylistID == "" {
+		return false, nil
+	}
+
+	var needsCheck bool
+	for i := range items {
+		if items[i].SyncedAt != nil && items[i].SpotifyTrackID != "" &&
+			items[i].Action != "added" && items[i].Action != "removed_from_playlist" {
+			needsCheck = true
+			break
+		}
+	}
+	if !needsCheck {
+		return false, nil
+	}
+
+	spToken, spClient, err := h.getProviderTokenFresh(ctx, providerSpotify)
+	if err != nil {
+		return false, fmt.Errorf("get spotify token: %w", err)
+	}
+
+	adapter := spotify.NewAdapter(spClient, spToken)
+	existingIDs, err := adapter.GetPlaylistTracks(ctx, spPlaylistID)
+	if err != nil {
+		return false, fmt.Errorf("get playlist tracks: %w", err)
+	}
+
+	existing := make(map[string]struct{}, len(existingIDs))
+	for _, id := range existingIDs {
+		existing[id] = struct{}{}
+	}
+
+	for i := range items {
+		if items[i].SyncedAt == nil || items[i].SpotifyTrackID == "" {
+			continue
+		}
+		if _, found := existing[items[i].SpotifyTrackID]; !found {
+			items[i].MissingFromPlaylist = true
+		}
+	}
+
+	return true, nil
+}
+
 // persistSyncItems inserts a sync_items row for each match returned by RunDry/RunDryInto.
 // action='pending_review' marks items awaiting user review in the UI.
 func (h *Handler) persistSyncItems(ctx context.Context, runID int, matches []domain.TrackMatch) error {
@@ -842,6 +1154,64 @@ UPDATE sync_runs SET status = ?, finished_at = datetime('now') WHERE id = ?
 	}()
 
 	http.Redirect(w, r, fmt.Sprintf("/runs/%d/progress", runID), http.StatusSeeOther)
+}
+
+// NewSchedulerSyncHandler returns a syncHandler callback suitable for
+// scheduler.New. It builds a fresh async runner from stored OAuth tokens,
+// creates a sync run, and runs the dry sync synchronously. The scheduler
+// owns the background timer; this callback runs inline.
+func (h *Handler) NewSchedulerSyncHandler() func(ctx context.Context, mapping *domain.PlaylistMapping) error {
+	return func(ctx context.Context, mapping *domain.PlaylistMapping) error {
+		runner, err := h.buildAsyncRunner(ctx)
+		if err != nil {
+			return fmt.Errorf("build sync runner: %w", err)
+		}
+
+		res, err := h.db.ExecContext(ctx, `
+INSERT INTO sync_runs(mapping_id, status, started_at)
+VALUES (?, ?, datetime('now'))
+`, mapping.ID, syncRunStatusRunning)
+		if err != nil {
+			return fmt.Errorf("create sync run: %w", err)
+		}
+		runIDRaw, err := res.LastInsertId()
+		if err != nil {
+			return fmt.Errorf("get run id: %w", err)
+		}
+		runID := int(runIDRaw)
+
+		run := &domain.SyncRun{
+			ID:        runID,
+			MappingID: mapping.ID,
+			Status:    syncRunStatusRunning,
+		}
+
+		matches, dryErr := runner.RunDryInto(ctx, run, mapping.ID)
+		if dryErr != nil {
+			ev := &domain.SyncRunEvent{RunID: runID, Level: "error", Message: fmt.Sprintf("Dry sync failed: %v", dryErr)}
+			if saveErr := h.eventRepo.SaveSyncRunEvent(ctx, ev); saveErr != nil {
+				slog.Warn("failed to save error event", "run_id", runID, "error", saveErr)
+			}
+			if _, updateErr := h.db.ExecContext(ctx, `
+UPDATE sync_runs SET status = ?, finished_at = datetime('now') WHERE id = ?
+`, syncRunStatusFailed, runID); updateErr != nil {
+				slog.Warn("failed to mark run failed", "run_id", runID, "error", updateErr)
+			}
+			return fmt.Errorf("dry sync failed: %w", dryErr)
+		}
+
+		if itemErr := h.persistSyncItems(ctx, runID, matches); itemErr != nil {
+			slog.Warn("failed to persist sync items", "run_id", runID, "error", itemErr)
+		}
+
+		if _, updateErr := h.db.ExecContext(ctx, `
+UPDATE sync_runs SET status = ?, finished_at = datetime('now') WHERE id = ?
+`, syncRunStatusCompleted, runID); updateErr != nil {
+			slog.Warn("failed to mark run completed", "run_id", runID, "error", updateErr)
+		}
+
+		return nil
+	}
 }
 
 // getProviderTokenFresh loads the stored OAuth token for provider, refreshes it
@@ -1090,6 +1460,48 @@ SELECT COUNT(1) FROM sync_items WHERE sync_run_id = ? AND youtube_video_id = ?
 	http.Redirect(w, r, fmt.Sprintf("/runs/%d/review?flash=Candidate+picked#match-%s", runID, ytVideoID), http.StatusSeeOther)
 }
 
+// requestResync handles POST /runs/{id}/resync.
+// Marks a previously synced track for re-sync so the next dry run will re-match it.
+func (h *Handler) requestResync(w http.ResponseWriter, r *http.Request) {
+	runID, ok := parsePathInt(r.PathValue("id"))
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, fmt.Sprintf("parse resync form: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	ytVideoID := strings.TrimSpace(r.FormValue("youtube_video_id"))
+	if ytVideoID == "" {
+		http.Error(w, "youtube_video_id is required", http.StatusBadRequest)
+		return
+	}
+
+	// Verify the video belongs to this run.
+	var exists int
+	err := h.db.QueryRowContext(r.Context(), `
+SELECT COUNT(1) FROM sync_items WHERE sync_run_id = ? AND youtube_video_id = ?
+`, runID, ytVideoID).Scan(&exists)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("verify run ownership: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if exists == 0 {
+		http.NotFound(w, r)
+		return
+	}
+
+	if err := h.matchRepo.UpdateResyncRequestedAt(r.Context(), ytVideoID, time.Now().UTC()); err != nil {
+		http.Error(w, fmt.Sprintf("request resync: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, fmt.Sprintf("/runs/%d?flash=Re-sync+requested+for+%s", runID, ytVideoID), http.StatusSeeOther)
+}
+
 func (h *Handler) oauthConnect(w http.ResponseWriter, r *http.Request) {
 	provider, ok := normalizeProvider(r.PathValue("provider"))
 	if !ok {
@@ -1203,6 +1615,55 @@ ON CONFLICT(provider) DO UPDATE SET
 	http.Redirect(w, r, fmt.Sprintf("/?flash=%s+connected", provider), http.StatusSeeOther)
 }
 
+func (h *Handler) showSettings(w http.ResponseWriter, r *http.Request) {
+	h.render(w, "settings.gohtml", settingsViewData{
+		TimeFormat: h.settings.TimeFormat,
+	})
+}
+
+func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		h.render(w, "settings.gohtml", settingsViewData{Flash: "Invalid form data"})
+		return
+	}
+
+	tf := r.FormValue("time_format")
+	if tf != "" && tf != "12h" && tf != "24h" {
+		h.render(w, "settings.gohtml", settingsViewData{TimeFormat: tf, Flash: "Invalid time format"})
+		return
+	}
+
+	s := &domain.UserSettings{TimeFormat: tf}
+	if err := h.settingsRepo.Save(r.Context(), s); err != nil {
+		slog.Error("save settings", "error", err)
+		h.render(w, "settings.gohtml", settingsViewData{TimeFormat: tf, Flash: "Failed to save settings"})
+		return
+	}
+
+	h.settings = s
+	h.render(w, "settings.gohtml", settingsViewData{TimeFormat: tf, Flash: "Settings saved"})
+}
+
+func (h *Handler) favicon(w http.ResponseWriter, r *http.Request) {
+	for _, path := range faviconPaths {
+		data, err := staticFS.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		switch {
+		case len(path) > 4 && path[len(path)-4:] == ".ico":
+			w.Header().Set("Content-Type", "image/x-icon")
+		default:
+			w.Header().Set("Content-Type", "image/svg+xml")
+		}
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+		return
+	}
+	http.NotFound(w, r)
+}
+
 func (h *Handler) providerConnected(ctx context.Context, provider string) (bool, error) {
 	var accessToken sql.NullString
 	terr := h.db.QueryRowContext(ctx, `
@@ -1226,6 +1687,7 @@ SELECT sr.id,
 	sr.mapping_id,
 	pm.youtube_playlist_title,
 	pm.spotify_playlist_title,
+	pm.spotify_playlist_id,
 	sr.started_at,
 	sr.finished_at,
 	sr.status
@@ -1241,6 +1703,7 @@ WHERE sr.id = ?
 		&run.MappingID,
 		&run.MappingYouTubeTitle,
 		&run.MappingSpotifyTitle,
+		&run.MappingSpotifyID,
 		&run.StartedAt,
 		&finishedAt,
 		&run.Status,
@@ -1265,7 +1728,9 @@ SELECT
 	COALESCE(tm.confidence, 0),
 	COALESCE(tm.decision, ''),
 	si.action,
-	COALESCE(si.error, '')
+	COALESCE(si.error, ''),
+	tm.synced_at,
+	tm.resync_requested_at
 FROM sync_items si
 LEFT JOIN track_matches tm ON tm.youtube_video_id = si.youtube_video_id
 WHERE si.sync_run_id = ?
@@ -1279,6 +1744,8 @@ ORDER BY si.id ASC
 	var items []syncItemView
 	for rows.Next() {
 		var item syncItemView
+		var syncedAt sql.NullTime
+		var resyncRequestedAt sql.NullTime
 		if err := rows.Scan(
 			&item.YouTubeVideoID,
 			&item.YouTubeTitle,
@@ -1289,8 +1756,17 @@ ORDER BY si.id ASC
 			&item.Decision,
 			&item.Action,
 			&item.Error,
+			&syncedAt,
+			&resyncRequestedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan sync item: %w", err)
+		}
+
+		if syncedAt.Valid {
+			item.SyncedAt = &syncedAt.Time
+		}
+		if resyncRequestedAt.Valid {
+			item.ResyncRequestedAt = &resyncRequestedAt.Time
 		}
 
 		items = append(items, item)
@@ -1330,7 +1806,8 @@ SELECT
 	COALESCE(tm.spotify_artist, ''),
 	tm.confidence,
 	COALESCE(tm.decision_source, ''),
-	tm.decision
+	tm.decision,
+	tm.synced_at
 FROM sync_items si
 JOIN track_matches tm ON tm.youtube_video_id = si.youtube_video_id
 WHERE si.sync_run_id = ?
@@ -1345,6 +1822,7 @@ ORDER BY si.id ASC
 	for rows.Next() {
 		var item reviewItemView
 		var decisionSource string
+		var syncedAt sql.NullTime
 		if err := rows.Scan(
 			&item.YouTubeVideoID,
 			&item.YouTubeTitle,
@@ -1354,6 +1832,7 @@ ORDER BY si.id ASC
 			&item.Confidence,
 			&decisionSource,
 			&item.Decision,
+			&syncedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan pending review item: %w", err)
 		}
@@ -1361,6 +1840,9 @@ ORDER BY si.id ASC
 		item.SpotifyURL = spotifyTrackURL(item.SpotifyTrackID)
 		item.IsPriorChoice = decisionSource == "user"
 		item.IsAutoMatch = domain.MatchDecision(item.Decision) == domain.MatchAuto
+		if syncedAt.Valid {
+			item.SyncedAt = &syncedAt.Time
+		}
 		items = append(items, item)
 	}
 

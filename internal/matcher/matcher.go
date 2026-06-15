@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/bateau84/yt2sp/internal/domain"
+	"github.com/bateau84/routarr/internal/domain"
 )
 
 var (

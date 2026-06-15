@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 540" font-family="ui-monospace, 'IBM Plex Mono', monospace">
+  <defs>
+    <style>
+      .bg    { fill: #07100d; }
+      .panel { fill: #0d1a14; }
+      .label { fill: #88a393; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; }
+      .hex   { fill: #e8f6df; font-size: 11px; }
+      .title { fill: #8dff9a; font-size: 14px; font-weight: bold; letter-spacing: 0.05em; }
+      .sub   { fill: #88a393; font-size: 10px; }
+      .bd    { stroke: #1e3328; fill: none; }
+      .bd-1  { stroke: rgba(141,255,154,0.22); fill: none; }
+    </style>
+  </defs>
+
+  <!-- Background -->
+  <rect class="bg" width="800" height="540" rx="6"/>
+
+  <!-- Title -->
+  <text x="30" y="38" class="title">▶ SIGNAL CONSOLE — DESIGN PALETTE</text>
+  <text x="30" y="56" class="sub">Routarr · Dark cockpit · Monospace · Signal colors</text>
+
+  <!-- ── Core colors ─────────────────────────────────── -->
+  <text x="30" y="92" class="label">Core colors</text>
+  <rect x="30" y="100" width="90" height="50" rx="3" fill="#07100d" class="bd"/>
+  <text x="75" y="133" text-anchor="middle" class="hex">#07100d</text>
+
+  <rect x="130" y="100" width="90" height="50" rx="3" fill="#0d1a14" class="bd"/>
+  <text x="175" y="133" text-anchor="middle" class="hex">#0d1a14</text>
+
+  <rect x="230" y="100" width="90" height="50" rx="3" fill="#1e3328"/>
+  <text x="275" y="133" text-anchor="middle" class="hex">#1e3328</text>
+
+  <rect x="330" y="100" width="90" height="50" rx="3" fill="#88a393"/>
+  <text x="375" y="133" text-anchor="middle" class="hex">#88a393</text>
+
+  <rect x="430" y="100" width="90" height="50" rx="3" fill="#e8f6df"/>
+  <text x="475" y="133" text-anchor="middle" class="hex" fill="#07100d">#e8f6df</text>
+
+  <text x="40" y="168" class="hex" fill="#88a393">--bg</text>
+  <text x="140" y="168" class="hex" fill="#88a393">--panel-bg</text>
+  <text x="240" y="168" class="hex" fill="#88a393">--border</text>
+  <text x="340" y="168" class="hex" fill="#88a393">--muted</text>
+  <text x="440" y="168" class="hex" fill="#88a393">--text</text>
+
+  <!-- ── Semantic colors ─────────────────────────────── -->
+  <text x="30" y="210" class="label">Semantic colors</text>
+
+  <rect x="30" y="218" width="90" height="50" rx="3" fill="#8dff9a"/>
+  <text x="75" y="251" text-anchor="middle" class="hex" fill="#07100d">#8dff9a</text>
+
+  <rect x="130" y="218" width="90" height="50" rx="3" fill="#ffc857"/>
+  <text x="175" y="251" text-anchor="middle" class="hex" fill="#07100d">#ffc857</text>
+
+  <rect x="230" y="218" width="90" height="50" rx="3" fill="#ff6b4a"/>
+  <text x="275" y="251" text-anchor="middle" class="hex">#ff6b4a</text>
+
+  <rect x="330" y="218" width="90" height="50" rx="3" fill="#64c8ff"/>
+  <text x="375" y="251" text-anchor="middle" class="hex" fill="#07100d">#64c8ff</text>
+
+  <text x="40" y="286" class="hex" fill="#88a393">--green</text>
+  <text x="140" y="286" class="hex" fill="#88a393">--amber</text>
+  <text x="240" y="286" class="hex" fill="#88a393">--red</text>
+  <text x="340" y="286" class="hex" fill="#88a393">--info</text>
+
+  <!-- ── Typography ──────────────────────────────────── -->
+  <text x="30" y="325" class="label">Typography</text>
+  <text x="30" y="345" class="hex" font-size="10">font-family: ui-monospace, 'IBM Plex Mono', monospace</text>
+  <text x="30" y="363" class="hex" font-size="10">line-height: 1.6  ·  font-weight: 700 (headings, badges, buttons)</text>
+
+  <text x="30" y="385" class="hex" fill="#88a393" font-size="9">0.70rem   0.72rem   0.78rem   0.82rem   0.85rem   0.90rem   1.00rem   1.30rem</text>
+  <text x="30" y="398" class="hex" fill="#88a393" font-size="7" letter-spacing="0.05">th         dt/badge  form-lbl  btn       td/cell   body      h2/nav    h1</text>
+
+  <!-- ── Spacing & corners ───────────────────────────── -->
+  <text x="460" y="325" class="label">Spacing</text>
+  <text x="460" y="345" class="hex" font-size="10">padding: 1.25rem 1.5rem (panel)</text>
+  <text x="460" y="363" class="hex" font-size="10">gap: 0.5rem (actions) / 1.5rem (nav)</text>
+  <text x="460" y="385" class="hex" font-size="10">radius: 3–4px</text>
+
+  <!-- ── Preview text sample ─────────────────────────── -->
+  <text x="30" y="435" class="label">Sample</text>
+  <rect x="30" y="446" width="740" height="70" rx="4" fill="#0d1a14" class="bd"/>
+
+  <text x="50" y="470" class="hex" font-size="9" fill="#88a393">▶ ROUTARR</text>
+  <text x="130" y="470" class="hex" font-size="9" fill="#88a393">+ NEW MAPPING</text>
+  <text x="260" y="470" class="hex" font-size="9" fill="#88a393">SETTINGS</text>
+
+  <text x="50" y="495" class="title" font-size="12">Active Sync Runs</text>
+  <rect x="50" y="502" width="120" height="6" rx="2" fill="#8dff9a" opacity="0.9"/>
+  <text x="180" y="507" class="hex" fill="#8dff9a" font-size="9">running</text>
+  <text x="240" y="507" class="hex" fill="#ffc857" font-size="9">3 pending</text>
+</svg>

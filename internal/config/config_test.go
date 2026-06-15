@@ -15,8 +15,8 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Addr != ":8080" {
 		t.Fatalf("expected default Addr %q, got %q", ":8080", cfg.Addr)
 	}
-	if cfg.DBPath != "yt2sp.db" {
-		t.Fatalf("expected default DBPath %q, got %q", "yt2sp.db", cfg.DBPath)
+	if cfg.DBPath != "routarr.db" {
+		t.Fatalf("expected default DBPath %q, got %q", "routarr.db", cfg.DBPath)
 	}
 	if cfg.YTClientID != "" {
 		t.Fatalf("expected empty YTClientID, got %q", cfg.YTClientID)

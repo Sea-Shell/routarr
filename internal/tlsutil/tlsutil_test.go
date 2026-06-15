@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bateau84/yt2sp/internal/tlsutil"
+	"github.com/bateau84/routarr/internal/tlsutil"
 )
 
 func TestGenerateSelfSignedCert(t *testing.T) {

@@ -1,4 +1,4 @@
-{{define "title"}}yt2sp — Run Telemetry #{{.Run.ID}}{{end}}
+{{define "title"}}Routarr — Run Telemetry #{{.Run.ID}}{{end}}
 
 {{define "content"}}
 <style>
@@ -64,6 +64,8 @@
 
     .telem-row:last-child { border-bottom: none; }
 
+    .telem-row > * { min-width: 0; }
+
     .telem-row:hover { background: rgba(141, 255, 154, 0.03); }
 
     .telem-track-primary {
@@ -94,6 +96,60 @@
         grid-column: 2 / -1;
         padding-top: 0.15rem;
     }
+
+    .telem-row-synced {
+        background: rgba(141, 255, 154, 0.04);
+        border-left: 3px solid var(--green);
+    }
+
+    .telem-row-synced:hover {
+        background: rgba(141, 255, 154, 0.07);
+    }
+
+    .telem-row-removed {
+        background: rgba(255, 200, 87, 0.04);
+        border-left: 3px solid var(--amber);
+    }
+
+    .telem-row-removed:hover {
+        background: rgba(255, 200, 87, 0.08);
+    }
+
+    .badge-synced {
+        display: inline-block;
+        background: var(--green);
+        color: var(--bg);
+        font-size: 0.65rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        padding: 0.15rem 0.45rem;
+        border-radius: 2px;
+        flex-shrink: 0;
+    }
+
+    .badge-removed {
+        display: inline-block;
+        background: var(--amber);
+        color: var(--bg);
+        font-size: 0.65rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        padding: 0.15rem 0.45rem;
+        border-radius: 2px;
+        flex-shrink: 0;
+    }
+
+    .btn-resync {
+        font-size: 0.72rem;
+        padding: 0.2rem 0.5rem;
+        color: var(--amber);
+        border-color: var(--amber);
+    }
+    .btn-resync:hover { background: rgba(255, 200, 87, 0.12); }
+
+    form.resync-form { display: inline; margin: 0; }
 
     /* ── Commit panel ────────────────────────────────────────── */
     .commit-panel {
@@ -145,10 +201,10 @@
 <div class="panel" style="margin-bottom:1.5rem;">
     <dl style="display:grid; grid-template-columns: max-content 1fr; gap:0.3rem 1.5rem; margin:0;">
         <dt style="color:var(--muted); text-transform:uppercase; font-size:0.72rem; font-weight:600;">Started</dt>
-        <dd style="margin:0;">{{.Run.StartedAt}}</dd>
+        <dd style="margin:0;"><time datetime="{{.Run.StartedAt.Format "2006-01-02T15:04:05Z07:00"}}" data-format="{{.TimeFormat}}">{{.Run.StartedAt.Format "2006-01-02 15:04:05 UTC"}}</time></dd>
 
         <dt style="color:var(--muted); text-transform:uppercase; font-size:0.72rem; font-weight:600;">Finished</dt>
-        <dd style="margin:0;">{{if .Run.FinishedAt}}{{.Run.FinishedAt}}{{else}}<span style="color:var(--muted)">—</span>{{end}}</dd>
+        <dd style="margin:0;">{{if .Run.FinishedAt}}<time datetime="{{.Run.FinishedAt.Format "2006-01-02T15:04:05Z07:00"}}" data-format="{{.TimeFormat}}">{{.Run.FinishedAt.Format "2006-01-02 15:04:05 UTC"}}</time>{{else}}<span style="color:var(--muted)">—</span>{{end}}</dd>
 
         <dt style="color:var(--muted); text-transform:uppercase; font-size:0.72rem; font-weight:600;">Run ID</dt>
         <dd style="margin:0; color:var(--muted);">#{{.Run.ID}}</dd>
@@ -192,10 +248,16 @@
         <span>Action</span>
     </div>
     {{range .Items}}
-    <div class="telem-row">
+    <div class="telem-row{{if .MissingFromPlaylist}} telem-row-removed{{else if .IsSynced}} telem-row-synced{{end}}">
         <!-- Status badge -->
         <span>
-            {{if eq .Decision "approved"}}
+            {{if .IsSynced}}
+                {{if .MissingFromPlaylist}}
+                    <span class="badge badge-removed">removed from playlist</span>
+                {{else}}
+                    <span class="badge badge-ok">synced ✓</span>
+                {{end}}
+            {{else if eq .Decision "approved"}}
                 <span class="badge badge-ok">approved</span>
             {{else if eq .Decision "auto"}}
                 <span class="badge badge-ok">auto</span>
@@ -210,15 +272,15 @@
 
         <!-- YouTube source -->
         <div>
-            <div class="telem-track-primary">{{if .YouTubeTitle}}{{.YouTubeTitle}}{{else}}{{.YouTubeVideoID}}{{end}}</div>
-            <div class="telem-track-secondary">{{.YouTubeVideoID}}</div>
+            <div class="telem-track-primary"{{if .YouTubeTitle}} title="{{.YouTubeTitle}}"{{end}}>{{if .YouTubeTitle}}{{.YouTubeTitle}}{{else}}{{.YouTubeVideoID}}{{end}}</div>
+            <div class="telem-track-secondary" title="{{.YouTubeVideoID}}">{{.YouTubeVideoID}}</div>
         </div>
 
         <!-- Spotify candidate -->
         <div>
             {{if .SpotifyTitle}}
-            <div class="telem-track-primary">{{.SpotifyTitle}}{{if .SpotifyArtist}} <span style="color:var(--muted); font-weight:400;">— {{.SpotifyArtist}}</span>{{end}}</div>
-            <div class="telem-track-secondary">{{.SpotifyTrackID}}</div>
+            <div class="telem-track-primary" title="{{.SpotifyTitle}}">{{.SpotifyTitle}}{{if .SpotifyArtist}} <span style="color:var(--muted); font-weight:400;">— {{.SpotifyArtist}}</span>{{end}}</div>
+            <div class="telem-track-secondary" title="{{.SpotifyTrackID}}">{{.SpotifyTrackID}}</div>
             {{else}}
             <div class="telem-track-secondary">no candidate</div>
             {{end}}
@@ -233,6 +295,18 @@
         <span>
             {{if eq .Action "added"}}
                 <span class="badge badge-ok">added</span>
+            {{else if eq .Action "removed_from_playlist"}}
+                <span class="badge badge-removed">removed</span>
+            {{else if .MissingFromPlaylist}}
+                <form method="post" action="/runs/{{$.Run.ID}}/resync" class="resync-form">
+                    <input type="hidden" name="youtube_video_id" value="{{.YouTubeVideoID}}" />
+                    <button class="btn btn-ghost btn-resync" type="submit">Re-sync</button>
+                </form>
+            {{else if .CanResync}}
+                <form method="post" action="/runs/{{$.Run.ID}}/resync" class="resync-form">
+                    <input type="hidden" name="youtube_video_id" value="{{.YouTubeVideoID}}" />
+                    <button class="btn btn-ghost btn-resync" type="submit">Re-sync</button>
+                </form>
             {{else if eq .Action "skipped_duplicate"}}
                 <span class="badge badge-muted">Skipped (duplicate)</span>
             {{else if eq .Action "duplicate"}}

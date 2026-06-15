@@ -1,11 +1,11 @@
 build:
-	go build -o bin/yt2sp ./cmd/yt2sp
+	go build -o bin/routarr ./cmd/routarr
 
 test:
 	go test -v ./...
 
 run: build
-	./bin/yt2sp
+	./bin/routarr
 
 clean:
 	rm -rf bin/

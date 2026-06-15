@@ -1,15 +1,17 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
 	"strings"
 
-	"github.com/bateau84/yt2sp/internal/adapters/sqlite"
-	"github.com/bateau84/yt2sp/internal/adapters/web"
-	"github.com/bateau84/yt2sp/internal/config"
-	"github.com/bateau84/yt2sp/internal/tlsutil"
+	"github.com/bateau84/routarr/internal/adapters/sqlite"
+	"github.com/bateau84/routarr/internal/adapters/web"
+	"github.com/bateau84/routarr/internal/config"
+	"github.com/bateau84/routarr/internal/scheduler"
+	"github.com/bateau84/routarr/internal/tlsutil"
 )
 
 func main() {
@@ -78,6 +80,12 @@ func main() {
 		log.Fatalf("init web handler: %v", err)
 	}
 
+	// Start the background scheduler.
+	schedCtx, schedCancel := context.WithCancel(context.Background())
+	defer schedCancel()
+	sched := scheduler.New(db, mappingRepo, webHandler.NewSchedulerSyncHandler())
+	go sched.Start(schedCtx)
+
 	mux := http.NewServeMux()
 	webHandler.RegisterRoutes(mux)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -92,7 +100,7 @@ func main() {
 	log.Printf("web ui enabled at %s://localhost%s", scheme, cfg.Addr)
 	log.Printf("db path: %s", cfg.DBPath)
 	log.Printf("oauth callbacks: %s/oauth/youtube/callback, %s/oauth/spotify/callback", cfg.OAuthBaseURL, cfg.OAuthBaseURL)
-	log.Printf("starting yt2sp on %s (tls: %v)", cfg.Addr, tlsMode)
+	log.Printf("starting Routarr on %s (tls: %v)", cfg.Addr, tlsMode)
 
 	if tlsMode {
 		if err := http.ListenAndServeTLS(cfg.Addr, certFile, keyFile, mux); err != nil {

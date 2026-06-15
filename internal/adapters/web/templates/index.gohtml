@@ -1,4 +1,4 @@
-{{define "title"}}yt2sp — Signal Console{{end}}
+{{define "title"}}Routarr — Signal Console{{end}}
 
 {{define "content"}}
 <style>
@@ -169,6 +169,9 @@
         <!-- Card header: route ID + state badges -->
         <div class="route-header">
             <span class="badge badge-muted">Route #{{.Mapping.ID}}</span>
+            {{if .Mapping.Schedule}}
+            <span class="badge badge-info" title="{{.Mapping.Schedule}}">scheduled</span>
+            {{end}}
             {{if gt .PendingReviewCount 0}}
             <span class="badge badge-warn">{{.PendingReviewCount}} Pending Review</span>
             {{end}}
@@ -201,6 +204,7 @@
             {{end}}
             {{end}}
             <span class="spacer"></span>
+            <a href="/mappings/{{.Mapping.ID}}/edit" class="btn btn-ghost">Edit</a>
             <form method="post" action="/mappings/{{.Mapping.ID}}/delete" onsubmit="return confirm('Delete route #{{.Mapping.ID}}?');">
                 <button class="btn btn-danger" type="submit">&#x2715; Delete</button>
             </form>
